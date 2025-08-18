@@ -7,6 +7,8 @@ comments: true
 ## 1. Overview
 The text detection module is a critical component of OCR (Optical Character Recognition) systems, responsible for locating and marking text-containing regions in images. The performance of this module directly impacts the accuracy and efficiency of the entire OCR system. The text detection module typically outputs bounding boxes for text regions, which are then passed to the text recognition module for further processing.
 
+PP-OCRv5 provides high-precision multilingual text detection models that supports Simplified Chinese, Pinyin, Traditional Chinese, English, Japanese, Korean, Latin-based languages, and more. Users can achieve accurate detection of multilingual text without the need to switch detection models.
+
 ## 2. Supported Models List
 
 <table>
