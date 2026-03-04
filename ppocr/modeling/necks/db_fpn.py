@@ -339,7 +339,7 @@ class DWRSEFPN(nn.Layer):
             self.inp_conv_dw.append(
                 DilatedReparamBlock(
                     channels=out_channels,
-                    kernel_size=5))
+                    kernel_size=7))
 
             self.inp_conv_pw.append(
                 nn.Conv2D(
