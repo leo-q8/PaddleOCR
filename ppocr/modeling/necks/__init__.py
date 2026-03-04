@@ -31,8 +31,8 @@ def build_neck(config):
     from .fpn_unet import FPN_UNet
     from .rf_adaptor import RFAdaptor
     support_dict = [
-        'FPN', 'FCEFPN', 'LKPAN', 'DBFPN', 'RSEFPN', 'DWRSEFPN', 
-        'EASTFPN', 'SASTFPN', 'SequenceEncoder', 'PGFPN', 'TableFPN', 
+        'FPN', 'FCEFPN', 'LKPAN', 'DBFPN', 'RSEFPN', 'DWRSEFPN',
+        'EASTFPN', 'SASTFPN', 'SequenceEncoder', 'PGFPN', 'TableFPN',
         'PRENFPN', 'CSPPAN', 'CTFPN', 'RFAdaptor', 'FPN_UNet', 'GPAN', 'GFPN'
     ]
 

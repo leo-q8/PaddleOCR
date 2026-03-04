@@ -88,6 +88,23 @@ class Head(nn.Layer):
         return x
 
 
+class AuxHead(nn.Layer):
+    """轻量辅助分割头：1×1 Conv → Sigmoid → 双线性上采样。仅训练使用。"""
+
+    def __init__(self, in_channels):
+        super(AuxHead, self).__init__()
+        self.conv = nn.Conv2D(
+            in_channels, 1, 1,
+            weight_attr=ParamAttr(
+                initializer=paddle.nn.initializer.KaimingUniform()),
+            bias_attr=get_bias_attr(in_channels))
+
+    def forward(self, x, target_size):
+        return F.interpolate(
+            F.sigmoid(self.conv(x)),
+            size=target_size, mode='bilinear', align_corners=False)
+
+
 class DBHead(nn.Layer):
     """
     Differentiable Binarization (DB) for text detection:
@@ -96,24 +113,45 @@ class DBHead(nn.Layer):
         params(dict): super parameters for build DB network
     """
 
-    def __init__(self, in_channels, k=50, **kwargs):
+    def __init__(self, in_channels, k=50, aux_in_channels=0, **kwargs):
         super(DBHead, self).__init__()
         self.k = k
         self.binarize = Head(in_channels, **kwargs)
         self.thresh = Head(in_channels, **kwargs)
+        self.aux_in_channels = aux_in_channels
+        if aux_in_channels > 0:
+            self.aux_head_p4 = AuxHead(aux_in_channels)
+            self.aux_head_p3 = AuxHead(aux_in_channels)
+            self.aux_head_p2 = AuxHead(aux_in_channels)
 
     def step_function(self, x, y):
         return paddle.reciprocal(1 + paddle.exp(-self.k * (x - y)))
 
     def forward(self, x, targets=None):
-        shrink_maps = self.binarize(x)
+        # 兼容 neck 返回 dict（训练）或 tensor（推理）
+        if isinstance(x, dict):
+            fuse = x['fuse']
+            aux_feats = {k: x[k] for k in ('aux_p4', 'aux_p3', 'aux_p2') if k in x}
+        else:
+            fuse = x
+            aux_feats = {}
+
+        shrink_maps = self.binarize(fuse)
         if not self.training:
             return {'maps': shrink_maps}
 
-        threshold_maps = self.thresh(x)
+        threshold_maps = self.thresh(fuse)
         binary_maps = self.step_function(shrink_maps, threshold_maps)
         y = paddle.concat([shrink_maps, threshold_maps, binary_maps], axis=1)
-        return {'maps': y}
+        result = {'maps': y}
+
+        if self.aux_in_channels > 0 and aux_feats:
+            target_size = shrink_maps.shape[2:]
+            for key, feat in aux_feats.items():
+                head = getattr(self, 'aux_head_' + key[4:])  # aux_p4 -> aux_head_p4
+                result['aux_maps_' + key[4:]] = head(feat, target_size)
+
+        return result
 
 
 class LocalModule(nn.Layer):

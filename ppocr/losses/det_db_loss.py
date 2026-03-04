@@ -40,6 +40,9 @@ class DBLoss(nn.Layer):
                  beta=10,
                  ohem_ratio=3,
                  eps=1e-6,
+                 aux_weight_p4=0.,
+                 aux_weight_p3=0.,
+                 aux_weight_p2=0.,
                  **kwargs):
         super(DBLoss, self).__init__()
         self.alpha = alpha
@@ -50,6 +53,9 @@ class DBLoss(nn.Layer):
             balance_loss=balance_loss,
             main_loss_type=main_loss_type,
             negative_ratio=ohem_ratio)
+        self.aux_weight_p4 = aux_weight_p4
+        self.aux_weight_p3 = aux_weight_p3
+        self.aux_weight_p2 = aux_weight_p2
 
     def forward(self, predicts, labels):
         predict_maps = predicts['maps']
@@ -84,4 +90,18 @@ class DBLoss(nn.Layer):
                   "loss_threshold_maps": loss_threshold_maps, \
                   "loss_binary_maps": loss_binary_maps, \
                   "loss_cbn": cbn_loss}
+
+        # 辅助 loss（复用 self.bce_loss 和 self.dice_loss）
+        for aux_key, aux_w in [('aux_maps_p4', self.aux_weight_p4),
+                               ('aux_maps_p3', self.aux_weight_p3),
+                               ('aux_maps_p2', self.aux_weight_p2)]:
+            if aux_w > 0 and aux_key in predicts:
+                aux_pred = predicts[aux_key][:, 0, :, :]
+                l_bce = self.bce_loss(aux_pred, label_shrink_map,
+                                      label_shrink_mask)
+                l_dice = self.dice_loss(aux_pred, label_shrink_map,
+                                        label_shrink_mask)
+                losses['loss_{}'.format(aux_key)] = l_bce + l_dice
+                losses['loss'] = losses['loss'] + aux_w * (l_bce + l_dice)
+
         return losses
