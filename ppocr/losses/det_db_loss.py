@@ -91,17 +91,32 @@ class DBLoss(nn.Layer):
                   "loss_binary_maps": loss_binary_maps, \
                   "loss_cbn": cbn_loss}
 
-        # 辅助 loss（复用 self.bce_loss 和 self.dice_loss）
+        # 辅助 loss
         for aux_key, aux_w in [('aux_maps_p4', self.aux_weight_p4),
                                ('aux_maps_p3', self.aux_weight_p3),
                                ('aux_maps_p2', self.aux_weight_p2)]:
             if aux_w > 0 and aux_key in predicts:
-                aux_pred = predicts[aux_key][:, 0, :, :]
-                l_bce = self.bce_loss(aux_pred, label_shrink_map,
-                                      label_shrink_mask)
-                l_dice = self.dice_loss(aux_pred, label_shrink_map,
-                                        label_shrink_mask)
-                losses['loss_{}'.format(aux_key)] = l_bce + l_dice
-                losses['loss'] = losses['loss'] + aux_w * (l_bce + l_dice)
+                aux_maps = predicts[aux_key]
+                if aux_maps.shape[1] == 3:
+                    # shared_aux: 完整 DB 辅助监督 (shrink + threshold + binary)
+                    aux_shrink = aux_maps[:, 0, :, :]
+                    aux_threshold = aux_maps[:, 1, :, :]
+                    aux_binary = aux_maps[:, 2, :, :]
+                    l_shrink = self.alpha * self.bce_loss(
+                        aux_shrink, label_shrink_map, label_shrink_mask)
+                    l_threshold = self.beta * self.l1_loss(
+                        aux_threshold, label_threshold_map, label_threshold_mask)
+                    l_binary = self.dice_loss(
+                        aux_binary, label_shrink_map, label_shrink_mask)
+                    aux_loss = l_shrink + l_threshold + l_binary
+                else:
+                    # 原有 AuxHead: 1 通道 shrink only
+                    aux_pred = aux_maps[:, 0, :, :]
+                    aux_loss = self.bce_loss(aux_pred, label_shrink_map,
+                                             label_shrink_mask) + \
+                               self.dice_loss(aux_pred, label_shrink_map,
+                                              label_shrink_mask)
+                losses['loss_{}'.format(aux_key)] = aux_loss
+                losses['loss'] = losses['loss'] + aux_w * aux_loss
 
         return losses

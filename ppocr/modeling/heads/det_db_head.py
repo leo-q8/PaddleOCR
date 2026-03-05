@@ -113,16 +113,26 @@ class DBHead(nn.Layer):
         params(dict): super parameters for build DB network
     """
 
-    def __init__(self, in_channels, k=50, aux_in_channels=0, **kwargs):
+    def __init__(self, in_channels, k=50, aux_in_channels=0, shared_aux=False, **kwargs):
         super(DBHead, self).__init__()
         self.k = k
         self.binarize = Head(in_channels, **kwargs)
         self.thresh = Head(in_channels, **kwargs)
         self.aux_in_channels = aux_in_channels
+        self.shared_aux = shared_aux
         if aux_in_channels > 0:
-            self.aux_head_p4 = AuxHead(aux_in_channels)
-            self.aux_head_p3 = AuxHead(aux_in_channels)
-            self.aux_head_p2 = AuxHead(aux_in_channels)
+            if shared_aux:
+                # 复用 self.binarize 作为辅助监督头，零额外参数。
+                # 各 aux 特征上采样到 1/4 分辨率后送入共享 binarize Head。
+                self._aux_upsample_scale = {
+                    'aux_p4': 4,   # 1/16 -> 1/4
+                    'aux_p3': 2,   # 1/8  -> 1/4
+                    'aux_p2': 1,   # 1/4  -> 1/4 (no-op)
+                }
+            else:
+                self.aux_head_p4 = AuxHead(aux_in_channels)
+                self.aux_head_p3 = AuxHead(aux_in_channels)
+                self.aux_head_p2 = AuxHead(aux_in_channels)
 
     def step_function(self, x, y):
         return paddle.reciprocal(1 + paddle.exp(-self.k * (x - y)))
@@ -146,10 +156,23 @@ class DBHead(nn.Layer):
         result = {'maps': y}
 
         if self.aux_in_channels > 0 and aux_feats:
-            target_size = shrink_maps.shape[2:]
-            for key, feat in aux_feats.items():
-                head = getattr(self, 'aux_head_' + key[4:])  # aux_p4 -> aux_head_p4
-                result['aux_maps_' + key[4:]] = head(feat, target_size)
+            if self.shared_aux:
+                for key, feat in aux_feats.items():
+                    scale = self._aux_upsample_scale[key]
+                    if scale > 1:
+                        feat = F.interpolate(
+                            feat, scale_factor=scale,
+                            mode='bilinear', align_corners=False)
+                    aux_shrink = self.binarize(feat)
+                    aux_thresh = self.thresh(feat)
+                    aux_binary = self.step_function(aux_shrink, aux_thresh)
+                    result['aux_maps_' + key[4:]] = paddle.concat(
+                        [aux_shrink, aux_thresh, aux_binary], axis=1)
+            else:
+                target_size = shrink_maps.shape[2:]
+                for key, feat in aux_feats.items():
+                    head = getattr(self, 'aux_head_' + key[4:])  # aux_p4 -> aux_head_p4
+                    result['aux_maps_' + key[4:]] = head(feat, target_size)
 
         return result
 
