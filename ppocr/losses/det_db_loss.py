@@ -97,25 +97,16 @@ class DBLoss(nn.Layer):
                                ('aux_maps_p2', self.aux_weight_p2)]:
             if aux_w > 0 and aux_key in predicts:
                 aux_maps = predicts[aux_key]
-                if aux_maps.shape[1] == 3:
-                    # shared_aux: 完整 DB 辅助监督 (shrink + threshold + binary)
-                    aux_shrink = aux_maps[:, 0, :, :]
-                    aux_threshold = aux_maps[:, 1, :, :]
-                    aux_binary = aux_maps[:, 2, :, :]
-                    l_shrink = self.alpha * self.bce_loss(
-                        aux_shrink, label_shrink_map, label_shrink_mask)
-                    l_threshold = self.beta * self.l1_loss(
-                        aux_threshold, label_threshold_map, label_threshold_mask)
-                    l_binary = self.dice_loss(
-                        aux_binary, label_shrink_map, label_shrink_mask)
-                    aux_loss = l_shrink + l_threshold + l_binary
-                else:
-                    # 原有 AuxHead: 1 通道 shrink only
-                    aux_pred = aux_maps[:, 0, :, :]
-                    aux_loss = self.bce_loss(aux_pred, label_shrink_map,
-                                             label_shrink_mask) + \
-                               self.dice_loss(aux_pred, label_shrink_map,
-                                              label_shrink_mask)
+                aux_shrink = aux_maps[:, 0, :, :]
+                aux_threshold = aux_maps[:, 1, :, :]
+                aux_binary = aux_maps[:, 2, :, :]
+                l_shrink = self.alpha * self.bce_loss(
+                    aux_shrink, label_shrink_map, label_shrink_mask)
+                l_threshold = self.beta * self.l1_loss(
+                    aux_threshold, label_threshold_map, label_threshold_mask)
+                l_binary = self.dice_loss(
+                    aux_binary, label_shrink_map, label_shrink_mask)
+                aux_loss = l_shrink + l_threshold + l_binary
                 losses['loss_{}'.format(aux_key)] = aux_loss
                 losses['loss'] = losses['loss'] + aux_w * aux_loss
 
