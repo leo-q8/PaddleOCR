@@ -23,7 +23,7 @@ from __future__ import print_function
 import paddle
 from paddle import nn
 
-from .det_basic_loss import BalanceLoss, MaskL1Loss, DiceLoss
+from .det_basic_loss import BalanceLoss, MaskL1Loss, DiceLoss, DiceFocalLoss
 
 
 class DBLoss(nn.Layer):
@@ -43,16 +43,28 @@ class DBLoss(nn.Layer):
                  aux_weight_p4=0.,
                  aux_weight_p3=0.,
                  aux_weight_p2=0.,
+                 focal_alpha=0.25,
+                 focal_gamma=2.0,
+                 dice_weight=1.0,
+                 focal_weight=1.0,
                  **kwargs):
         super(DBLoss, self).__init__()
         self.alpha = alpha
         self.beta = beta
-        self.dice_loss = DiceLoss(eps=eps)
+        self.dice_loss = DiceFocalLoss(eps=eps)
         self.l1_loss = MaskL1Loss(eps=eps)
-        self.bce_loss = BalanceLoss(
-            balance_loss=balance_loss,
-            main_loss_type=main_loss_type,
-            negative_ratio=ohem_ratio)
+        if main_loss_type == 'DiceFocalLoss':
+            self.bce_loss = DiceFocalLoss(
+                dice_weight=dice_weight,
+                focal_weight=focal_weight,
+                focal_alpha=focal_alpha,
+                focal_gamma=focal_gamma,
+                eps=eps)
+        else:
+            self.bce_loss = BalanceLoss(
+                balance_loss=balance_loss,
+                main_loss_type=main_loss_type,
+                negative_ratio=ohem_ratio)
         self.aux_weight_p4 = aux_weight_p4
         self.aux_weight_p3 = aux_weight_p3
         self.aux_weight_p2 = aux_weight_p2
