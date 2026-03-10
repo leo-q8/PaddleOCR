@@ -26,7 +26,7 @@ import cv2
 from shapely.geometry import Polygon
 import pyclipper
 
-__all__ = ['MakeShrinkMap']
+__all__ = ['MakeShrinkMap', 'MakeShrinkMapAA']
 
 
 class MakeShrinkMap(object):
@@ -125,3 +125,74 @@ class MakeShrinkMap(object):
             area += p[0] * q[1] - p[1] * q[0]
             q = p
         return area / 2.0
+
+
+class MakeShrinkMapAA(MakeShrinkMap):
+    """Anti-aliased MakeShrinkMap via SSAA on fillPoly operations.
+
+    Performs all cv2.fillPoly calls at aa_scale× resolution, then
+    downsamples gt and mask with INTER_AREA for smooth polygon edges.
+    No distance field computation — overhead is just fillPoly + one resize.
+    """
+
+    def __init__(self, aa_scale=4, min_text_size=8, shrink_ratio=0.4,
+                 **kwargs):
+        super().__init__(min_text_size=min_text_size,
+                         shrink_ratio=shrink_ratio, **kwargs)
+        self.aa_scale = aa_scale
+
+    def __call__(self, data):
+        S = self.aa_scale
+        image = data['image']
+        text_polys = data['polys']
+        ignore_tags = data['ignore_tags']
+
+        h, w = image.shape[:2]
+        text_polys, ignore_tags = self.validate_polygons(text_polys,
+                                                         ignore_tags, h, w)
+        gt = np.zeros((h * S, w * S), dtype=np.float32)
+        mask = np.ones((h * S, w * S), dtype=np.float32)
+        for i in range(len(text_polys)):
+            polygon = text_polys[i]
+            height = max(polygon[:, 1]) - min(polygon[:, 1])
+            width = max(polygon[:, 0]) - min(polygon[:, 0])
+            if ignore_tags[i] or min(height, width) < self.min_text_size:
+                cv2.fillPoly(mask,
+                             (polygon * S).astype(np.int32)[np.newaxis, :, :],
+                             0)
+                ignore_tags[i] = True
+            else:
+                polygon_shape = Polygon(polygon)
+                subject = [tuple(l) for l in polygon]
+                padding = pyclipper.PyclipperOffset()
+                padding.AddPath(subject, pyclipper.JT_ROUND,
+                                pyclipper.ET_CLOSEDPOLYGON)
+                shrinked = []
+
+                possible_ratios = np.arange(self.shrink_ratio, 1,
+                                            self.shrink_ratio)
+                np.append(possible_ratios, 1)
+                for ratio in possible_ratios:
+                    distance = polygon_shape.area * (
+                        1 - np.power(ratio, 2)) / polygon_shape.length
+                    shrinked = padding.Execute(-distance)
+                    if len(shrinked) == 1:
+                        break
+
+                if shrinked == []:
+                    cv2.fillPoly(
+                        mask,
+                        (polygon * S).astype(np.int32)[np.newaxis, :, :], 0)
+                    ignore_tags[i] = True
+                    continue
+
+                for each_shirnk in shrinked:
+                    shirnk = np.array(each_shirnk).reshape(-1, 2)
+                    cv2.fillPoly(gt, [(shirnk * S).astype(np.int32)], 1)
+
+        # downsample to original resolution
+        data['shrink_map'] = cv2.resize(gt, (w, h),
+                                        interpolation=cv2.INTER_AREA)
+        data['shrink_mask'] = cv2.resize(mask, (w, h),
+                                         interpolation=cv2.INTER_AREA)
+        return data

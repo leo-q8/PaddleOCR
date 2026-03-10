@@ -23,7 +23,7 @@ from __future__ import print_function
 import paddle
 from paddle import nn
 
-from .det_basic_loss import BalanceLoss, MaskL1Loss, DiceLoss, DiceFocalLoss
+from .det_basic_loss import BalanceLoss, MaskL1Loss, DiceLoss, DiceFocalLoss, TverskyLoss, TverskyFocalLoss
 
 
 class DBLoss(nn.Layer):
@@ -47,6 +47,9 @@ class DBLoss(nn.Layer):
                  focal_gamma=2.0,
                  dice_weight=1.0,
                  focal_weight=1.0,
+                 tversky_alpha=0.3,
+                 tversky_beta=0.7,
+                 tversky_weight=1.0,
                  **kwargs):
         super(DBLoss, self).__init__()
         self.alpha = alpha
@@ -57,6 +60,15 @@ class DBLoss(nn.Layer):
             self.bce_loss = DiceFocalLoss(
                 dice_weight=dice_weight,
                 focal_weight=focal_weight,
+                focal_alpha=focal_alpha,
+                focal_gamma=focal_gamma,
+                eps=eps)
+        elif main_loss_type == 'TverskyFocalLoss':
+            self.bce_loss = TverskyFocalLoss(
+                tversky_weight=tversky_weight,
+                focal_weight=focal_weight,
+                tversky_alpha=tversky_alpha,
+                tversky_beta=tversky_beta,
                 focal_alpha=focal_alpha,
                 focal_gamma=focal_gamma,
                 eps=eps)

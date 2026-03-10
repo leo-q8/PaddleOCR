@@ -270,3 +270,105 @@ class DiceFocalLoss(nn.Layer):
         loss_dice = self.dice_loss(pred, gt, mask)
         loss_focal = self.focal_loss(pred, gt, mask)
         return self.dice_weight * loss_dice + self.focal_weight * loss_focal
+
+
+class TverskyLoss(nn.Layer):
+    """
+    Tversky Loss for binary segmentation — an asymmetric generalization of DiceLoss.
+
+    Tversky Index:
+        TI = TP / (TP + alpha * FP + beta * FN)
+    TverskyLoss = 1 - TI
+
+    By setting beta > alpha, false negatives (missed text) are penalized more
+    heavily than false positives (background mistaken for text), which is
+    desirable for text detection where recall matters more than precision.
+
+    Special cases:
+        alpha = beta = 0.5  →  equivalent to DiceLoss
+        alpha = beta = 1.0  →  equivalent to Jaccard / IoU Loss
+
+    Args:
+        alpha (float): Weight for false positives (FP). Default: 0.3.
+        beta  (float): Weight for false negatives (FN). Default: 0.7.
+            Recommended: alpha + beta = 1.0.
+        eps   (float): Numerical stability constant. Default: 1e-6.
+
+    Reference:
+        Salehi et al., "Tversky loss function for image segmentation using
+        3D fully convolutional deep networks", MICCAI 2017.
+    """
+
+    def __init__(self, alpha=0.3, beta=0.7, eps=1e-6):
+        super(TverskyLoss, self).__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.eps = eps
+
+    def forward(self, pred, gt, mask, weights=None):
+        """
+        Args:
+            pred    (Tensor): Predicted probability map, shape (B, H, W), in [0, 1].
+            gt      (Tensor): Binary ground-truth map, shape (B, H, W).
+            mask    (Tensor): Valid-pixel mask, shape (B, H, W).
+            weights (Tensor): Optional per-pixel weights, same shape as mask.
+        Returns:
+            Tensor: Scalar Tversky loss in [0, 1].
+        """
+        assert pred.shape == gt.shape
+        assert pred.shape == mask.shape
+        if weights is not None:
+            assert weights.shape == mask.shape
+            mask = weights * mask
+
+        TP = paddle.sum(pred * gt * mask)
+        FP = paddle.sum(pred * (1.0 - gt) * mask)
+        FN = paddle.sum((1.0 - pred) * gt * mask)
+
+        tversky_index = TP / (TP + self.alpha * FP + self.beta * FN + self.eps)
+        return 1.0 - tversky_index
+
+
+class TverskyFocalLoss(nn.Layer):
+    """
+    Combined TverskyLoss + MaskedFocalLoss for binary text segmentation.
+
+    TverskyLoss provides asymmetric region-level supervision (penalizing FN
+    more than FP via beta > alpha), while MaskedFocalLoss adds per-pixel
+    hard-example mining. Together they complement each other: Tversky for
+    recall-oriented global shape quality, Focal for boundary precision.
+
+    Drop-in replacement for BalanceLoss / DiceFocalLoss — same
+    forward(pred, gt, mask) signature, returns a scalar.
+
+    Args:
+        tversky_weight (float): Weight for the TverskyLoss term. Default: 1.0.
+        focal_weight   (float): Weight for the MaskedFocalLoss term. Default: 1.0.
+        tversky_alpha  (float): FP penalty in Tversky index. Default: 0.3.
+        tversky_beta   (float): FN penalty in Tversky index. Default: 0.7.
+        focal_alpha    (float): Positive-class balancing factor for FocalLoss.
+            Default: 0.75.
+        focal_gamma    (float): Focusing exponent for FocalLoss. Default: 2.0.
+        eps            (float): Numerical stability constant. Default: 1e-6.
+    """
+
+    def __init__(self,
+                 tversky_weight=1.0,
+                 focal_weight=1.0,
+                 tversky_alpha=0.3,
+                 tversky_beta=0.7,
+                 focal_alpha=0.75,
+                 focal_gamma=2.0,
+                 eps=1e-6):
+        super(TverskyFocalLoss, self).__init__()
+        self.tversky_weight = tversky_weight
+        self.focal_weight = focal_weight
+        self.tversky_loss = TverskyLoss(
+            alpha=tversky_alpha, beta=tversky_beta, eps=eps)
+        self.focal_loss = MaskedFocalLoss(
+            alpha=focal_alpha, gamma=focal_gamma, eps=eps)
+
+    def forward(self, pred, gt, mask=None):
+        loss_tversky = self.tversky_loss(pred, gt, mask)
+        loss_focal = self.focal_loss(pred, gt, mask)
+        return self.tversky_weight * loss_tversky + self.focal_weight * loss_focal

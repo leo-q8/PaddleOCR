@@ -32,7 +32,7 @@ import warnings
 
 warnings.simplefilter("ignore")
 
-__all__ = ['MakeBorderMap']
+__all__ = ['MakeBorderMap', 'MakeBorderMapAA']
 
 
 class MakeBorderMap(object):
@@ -175,3 +175,129 @@ class MakeBorderMap(object):
             lineType=cv2.LINE_AA,
             shift=0)
         return ex_point_1, ex_point_2
+
+
+class MakeBorderMapAA(MakeBorderMap):
+    """Anti-aliased MakeBorderMap via global Supersampled Anti-Aliasing (SSAA).
+
+    Creates canvas and mask at aa_scale× resolution, computes distance maps
+    with vectorized projection (all edges at once, no Python loop), then
+    downsamples with INTER_AREA (box filter) for smooth sub-pixel edges.
+    """
+
+    def __init__(self,
+                 aa_scale=4,
+                 shrink_ratio=0.4,
+                 thresh_min=0.3,
+                 thresh_max=0.7,
+                 **kwargs):
+        super().__init__(
+            shrink_ratio=shrink_ratio,
+            thresh_min=thresh_min,
+            thresh_max=thresh_max,
+            **kwargs)
+        self.aa_scale = aa_scale
+
+    def __call__(self, data):
+        S = self.aa_scale
+        img = data['image']
+        text_polys = data['polys']
+        ignore_tags = data['ignore_tags']
+
+        H, W = img.shape[:2]
+        canvas = np.zeros((H * S, W * S), dtype=np.float32)
+        mask = np.zeros((H * S, W * S), dtype=np.float32)
+
+        for i in range(len(text_polys)):
+            if ignore_tags[i]:
+                continue
+            self.draw_border_map(text_polys[i] * S, canvas, mask=mask)
+
+        # downsample to original resolution with area averaging (box filter)
+        canvas = cv2.resize(canvas, (W, H), interpolation=cv2.INTER_AREA)
+        mask = cv2.resize(mask, (W, H), interpolation=cv2.INTER_AREA)
+
+        canvas = canvas * (self.thresh_max - self.thresh_min) + self.thresh_min
+
+        data['threshold_map'] = canvas
+        data['threshold_mask'] = mask
+        return data
+
+    def draw_border_map(self, polygon, canvas, mask):
+        polygon = np.array(polygon, dtype=np.float32)
+        assert polygon.ndim == 2
+        assert polygon.shape[1] == 2
+
+        polygon_shape = Polygon(polygon)
+        if polygon_shape.area <= 0:
+            return
+        distance = polygon_shape.area * (
+            1 - np.power(self.shrink_ratio, 2)) / polygon_shape.length
+        subject = [tuple(l) for l in polygon]
+        padding = pyclipper.PyclipperOffset()
+        padding.AddPath(subject, pyclipper.JT_ROUND,
+                        pyclipper.ET_CLOSEDPOLYGON)
+
+        padded_polygon = np.array(padding.Execute(distance)[0])
+        cv2.fillPoly(mask, [padded_polygon.astype(np.int32)], 1.0)
+
+        xmin = padded_polygon[:, 0].min()
+        xmax = padded_polygon[:, 0].max()
+        ymin = padded_polygon[:, 1].min()
+        ymax = padded_polygon[:, 1].max()
+        w = int(xmax - xmin + 1)
+        h = int(ymax - ymin + 1)
+
+        polygon[:, 0] -= xmin
+        polygon[:, 1] -= ymin
+
+        # float32 grids — halves memory and compute vs default float64
+        xs = np.broadcast_to(
+            np.linspace(0, xmax - xmin, num=w, dtype=np.float32).reshape(1, w),
+            (h, w))
+        ys = np.broadcast_to(
+            np.linspace(0, ymax - ymin, num=h, dtype=np.float32).reshape(h, 1),
+            (h, w))
+
+        # Vectorized distance: all edges at once via projection formula
+        N = polygon.shape[0]
+        p1 = polygon                        # (N, 2) edge start points
+        p2 = np.roll(polygon, -1, axis=0)   # (N, 2) edge end points
+
+        ex = (p2[:, 0] - p1[:, 0]).reshape(N, 1, 1)
+        ey = (p2[:, 1] - p1[:, 1]).reshape(N, 1, 1)
+        p1x = p1[:, 0].reshape(N, 1, 1)
+        p1y = p1[:, 1].reshape(N, 1, 1)
+        seg_len_sq = ex * ex + ey * ey       # (N, 1, 1)
+
+        # projection parameter t clamped to [0, 1]
+        # reuse buffer to avoid extra allocations
+        t = ((xs[np.newaxis] - p1x) * ex +
+             (ys[np.newaxis] - p1y) * ey) / (seg_len_sq + 1e-7)
+        np.clip(t, 0, 1, out=t)
+
+        # distance from each grid point to closest point on each edge
+        dx = xs[np.newaxis] - p1x
+        dx -= t * ex          # in-place subtract
+        dy = ys[np.newaxis] - p1y
+        dy -= t * ey          # in-place subtract
+        np.square(dx, out=dx)
+        np.square(dy, out=dy)
+        dx += dy              # in-place add → sq_dist, reuse dx buffer
+        del dy, t
+        np.sqrt(dx, out=dx)  # dx is now dist_all (N, H, W)
+
+        inv_dist = np.float32(1.0 / distance)
+        dx *= inv_dist        # in-place scale
+        np.clip(dx, 0, 1, out=dx)
+        distance_map = dx.min(axis=0)  # (H, W)
+        del dx
+
+        xmin_valid = min(max(0, xmin), canvas.shape[1] - 1)
+        xmax_valid = min(max(0, xmax), canvas.shape[1] - 1)
+        ymin_valid = min(max(0, ymin), canvas.shape[0] - 1)
+        ymax_valid = min(max(0, ymax), canvas.shape[0] - 1)
+        canvas[ymin_valid:ymax_valid + 1, xmin_valid:xmax_valid + 1] = np.fmax(
+            1 - distance_map[ymin_valid - ymin:ymax_valid - ymax + h,
+                             xmin_valid - xmin:xmax_valid - xmax + w],
+            canvas[ymin_valid:ymax_valid + 1, xmin_valid:xmax_valid + 1])
