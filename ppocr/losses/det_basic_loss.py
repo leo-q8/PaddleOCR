@@ -355,9 +355,9 @@ class TverskyFocalLoss(nn.Layer):
     def __init__(self,
                  tversky_weight=1.0,
                  focal_weight=1.0,
-                 tversky_alpha=0.3,
-                 tversky_beta=0.7,
-                 focal_alpha=0.75,
+                 tversky_alpha=1.0,
+                 tversky_beta=1.0,
+                 focal_alpha=0.25,
                  focal_gamma=2.0,
                  eps=1e-6):
         super(TverskyFocalLoss, self).__init__()

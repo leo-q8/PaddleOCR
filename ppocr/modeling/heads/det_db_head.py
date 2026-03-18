@@ -22,6 +22,7 @@ from paddle import nn
 import paddle.nn.functional as F
 from paddle import ParamAttr
 from ppocr.modeling.backbones.det_mobilenet_v3 import ConvBNLayer
+from ppocr.modeling.backbones.rec_repvit import RepVGGDW
 
 
 def get_bias_attr(k):
@@ -32,16 +33,27 @@ def get_bias_attr(k):
 
 
 class Head(nn.Layer):
-    def __init__(self, in_channels, kernel_list=[3, 2, 2], **kwargs):
+    def __init__(self, in_channels, kernel_list=[3, 2, 2], rep_conv1=False, **kwargs):
         super(Head, self).__init__()
+        self.rep_conv1 = rep_conv1
 
-        self.conv1 = nn.Conv2D(
-            in_channels=in_channels,
-            out_channels=in_channels // 4,
-            kernel_size=kernel_list[0],
-            padding=int(kernel_list[0] // 2),
-            weight_attr=ParamAttr(),
-            bias_attr=False)
+        if rep_conv1:
+            self.conv1_dw = RepVGGDW(in_channels)
+            self.conv1_act = nn.Hardswish()
+            self.conv1_pw = nn.Conv2D(
+                in_channels=in_channels,
+                out_channels=in_channels // 4,
+                kernel_size=1,
+                weight_attr=ParamAttr(),
+                bias_attr=False)
+        else:
+            self.conv1 = nn.Conv2D(
+                in_channels=in_channels,
+                out_channels=in_channels // 4,
+                kernel_size=kernel_list[0],
+                padding=int(kernel_list[0] // 2),
+                weight_attr=ParamAttr(),
+                bias_attr=False)
         self.conv_bn1 = nn.BatchNorm(
             num_channels=in_channels // 4,
             param_attr=ParamAttr(
@@ -75,7 +87,12 @@ class Head(nn.Layer):
             bias_attr=get_bias_attr(in_channels // 4), )
 
     def forward(self, x, return_f=False):
-        x = self.conv1(x)
+        if self.rep_conv1:
+            x = self.conv1_dw(x)
+            x = self.conv1_act(x)
+            x = self.conv1_pw(x)
+        else:
+            x = self.conv1(x)
         x = self.conv_bn1(x)
         x = self.conv2(x)
         x = self.conv_bn2(x)
@@ -96,21 +113,12 @@ class DBHead(nn.Layer):
         params(dict): super parameters for build DB network
     """
 
-    def __init__(self, in_channels, k=50, aux_in_channels=0,
-                 shared_aux=False, aux_mode=None, **kwargs):
+    def __init__(self, in_channels, k=50, aux_in_channels=0, **kwargs):
         super(DBHead, self).__init__()
         self.k = k
         self.binarize = Head(in_channels, **kwargs)
         self.thresh = Head(in_channels, **kwargs)
         self.aux_in_channels = aux_in_channels
-
-        # 优先使用 aux_mode；否则通过 shared_aux 向后兼容映射
-        if aux_mode is not None:
-            self.aux_mode = aux_mode
-        elif shared_aux:
-            self.aux_mode = 'shared'
-        else:
-            self.aux_mode = 'independent'
 
         if aux_in_channels > 0:
             self._aux_upsample_scale = {
@@ -118,16 +126,13 @@ class DBHead(nn.Layer):
                 'aux_p3': 2,   # 1/8  -> 1/4
                 'aux_p2': 1,   # 1/4  -> 1/4 (no-op)
             }
-            if self.aux_mode == 'shared':
-                pass  # 复用 self.binarize / self.thresh，零额外参数
-            elif self.aux_mode == 'independent':
-                # 每个尺度独立创建 binarize + thresh Head 对
-                self.aux_binarize_p4 = Head(aux_in_channels, **kwargs)
-                self.aux_thresh_p4 = Head(aux_in_channels, **kwargs)
-                self.aux_binarize_p3 = Head(aux_in_channels, **kwargs)
-                self.aux_thresh_p3 = Head(aux_in_channels, **kwargs)
-                self.aux_binarize_p2 = Head(aux_in_channels, **kwargs)
-                self.aux_thresh_p2 = Head(aux_in_channels, **kwargs)
+            # 每个尺度独立创建 binarize + thresh Head 对
+            self.aux_binarize_p4 = Head(aux_in_channels, **kwargs)
+            self.aux_thresh_p4 = Head(aux_in_channels, **kwargs)
+            self.aux_binarize_p3 = Head(aux_in_channels, **kwargs)
+            self.aux_thresh_p3 = Head(aux_in_channels, **kwargs)
+            self.aux_binarize_p2 = Head(aux_in_channels, **kwargs)
+            self.aux_thresh_p2 = Head(aux_in_channels, **kwargs)
 
     def step_function(self, x, y):
         return paddle.reciprocal(1 + paddle.exp(-self.k * (x - y)))
@@ -151,33 +156,20 @@ class DBHead(nn.Layer):
         result = {'maps': y}
 
         if self.aux_in_channels > 0 and aux_feats:
-            if self.aux_mode == 'shared':
-                for key, feat in aux_feats.items():
-                    scale = self._aux_upsample_scale[key]
-                    if scale > 1:
-                        feat = F.interpolate(
-                            feat, scale_factor=scale,
-                            mode='bilinear', align_corners=False)
-                    aux_shrink = self.binarize(feat)
-                    aux_thresh = self.thresh(feat)
-                    aux_binary = self.step_function(aux_shrink, aux_thresh)
-                    result['aux_maps_' + key[4:]] = paddle.concat(
-                        [aux_shrink, aux_thresh, aux_binary], axis=1)
-            elif self.aux_mode == 'independent':
-                for key, feat in aux_feats.items():
-                    scale = self._aux_upsample_scale[key]
-                    if scale > 1:
-                        feat = F.interpolate(
-                            feat, scale_factor=scale,
-                            mode='bilinear', align_corners=False)
-                    level = key[4:]  # 'p4', 'p3', 'p2'
-                    aux_binarize = getattr(self, 'aux_binarize_' + level)
-                    aux_thresh_head = getattr(self, 'aux_thresh_' + level)
-                    aux_shrink = aux_binarize(feat)
-                    aux_thresh = aux_thresh_head(feat)
-                    aux_binary = self.step_function(aux_shrink, aux_thresh)
-                    result['aux_maps_' + level] = paddle.concat(
-                        [aux_shrink, aux_thresh, aux_binary], axis=1)
+            for key, feat in aux_feats.items():
+                scale = self._aux_upsample_scale[key]
+                if scale > 1:
+                    feat = F.interpolate(
+                        feat, scale_factor=scale,
+                        mode='bilinear', align_corners=False)
+                level = key[4:]  # 'p4', 'p3', 'p2'
+                aux_binarize = getattr(self, 'aux_binarize_' + level)
+                aux_thresh_head = getattr(self, 'aux_thresh_' + level)
+                aux_shrink = aux_binarize(feat)
+                aux_thresh = aux_thresh_head(feat)
+                aux_binary = self.step_function(aux_shrink, aux_thresh)
+                result['aux_maps_' + level] = paddle.concat(
+                    [aux_shrink, aux_thresh, aux_binary], axis=1)
 
         return result
 
