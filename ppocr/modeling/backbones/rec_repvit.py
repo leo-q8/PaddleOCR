@@ -316,6 +316,18 @@ class RepViT(nn.Layer):
         x = nn.functional.avg_pool2d(x, [h, 2])
         return x
 
+    def fuse_model(self):
+        """Fuse all Conv2D_BN, RepVGGDW, Residual branches for deployment."""
+        for name, sublayer in self.named_sublayers():
+            if not isinstance(sublayer, (Conv2D_BN, RepVGGDW, Residual)):
+                continue
+            parts = name.rsplit('.', 1)
+            if len(parts) == 2:
+                parent = self
+                for p in parts[0].split('.'):
+                    parent = getattr(parent, p)
+                setattr(parent, parts[1], sublayer.fuse())
+
 
 def RepSVTR(in_channels=3):
     """

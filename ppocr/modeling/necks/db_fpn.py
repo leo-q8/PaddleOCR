@@ -23,6 +23,7 @@ from paddle import ParamAttr
 import os
 import sys
 from ppocr.modeling.necks.intracl import IntraCLBlock
+from ppocr.modeling.backbones.rec_repvit import RepVGGDW
 
 __dir__ = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(__dir__)
@@ -400,6 +401,113 @@ class DWRSEFPN(nn.Layer):
         """Merge DilatedReparamBlock branches for inference deployment."""
         for i in range(len(self.inp_conv_dw)):
             self.inp_conv_dw[i].merge_dilated_branches()
+
+
+class RepViTRSEFPN(nn.Layer):
+    """RSEFPN variant using RepVGGDW (DW 3×3 reparam) + PW 1×1 for inp_conv.
+
+    Per-scale inp_conv path:
+      RepVGGDW(out_channels)            # DW 3×3, multi-branch training
+      → HardSwish
+      → Conv2D(out_channels → out_channels//4, k=1)  # PW channel reduction
+      → SE
+
+    Training: RepVGGDW runs 3 branches (3×3 DW + 1×1 DW + identity).
+    Deploy:   merge_reparam_blocks() fuses to single 3×3 DW conv.
+    """
+
+    def __init__(self, in_channels, out_channels, shortcut=True, **kwargs):
+        super(RepViTRSEFPN, self).__init__()
+        self.out_channels = out_channels
+        self.shortcut = shortcut
+        self.ins_conv = nn.LayerList()
+        self.inp_dw1 = nn.LayerList()
+        self.inp_dw2 = nn.LayerList()
+        self.inp_dw3 = nn.LayerList()
+        self.inp_pw = nn.LayerList()
+        self.act = nn.Hardswish()
+
+        self.intracl = False
+        if 'intracl' in kwargs.keys() and kwargs['intracl'] is True:
+            self.intracl = kwargs['intracl']
+            self.incl1 = IntraCLBlock(self.out_channels // 4, reduce_factor=2)
+            self.incl2 = IntraCLBlock(self.out_channels // 4, reduce_factor=2)
+            self.incl3 = IntraCLBlock(self.out_channels // 4, reduce_factor=2)
+            self.incl4 = IntraCLBlock(self.out_channels // 4, reduce_factor=2)
+
+        weight_attr = paddle.nn.initializer.KaimingUniform()
+
+        for i in range(len(in_channels)):
+            self.ins_conv.append(
+                RSELayer(
+                    in_channels[i],
+                    out_channels,
+                    kernel_size=1,
+                    shortcut=shortcut))
+
+            self.inp_dw1.append(RepVGGDW(out_channels))
+            self.inp_dw2.append(RepVGGDW(out_channels))
+            self.inp_dw3.append(RepVGGDW(out_channels))
+            self.inp_pw.append(
+                nn.Conv2D(
+                    in_channels=out_channels,
+                    out_channels=out_channels // 4,
+                    kernel_size=1,
+                    weight_attr=ParamAttr(initializer=weight_attr),
+                    bias_attr=False))
+
+    def merge_reparam_blocks(self):
+        """Fuse all RepVGGDW 3-branch structures into single 3×3 DW convs."""
+        for i in range(len(self.inp_dw1)):
+            if isinstance(self.inp_dw1[i], RepVGGDW):
+                self.inp_dw1[i] = self.inp_dw1[i].fuse()
+            if isinstance(self.inp_dw2[i], RepVGGDW):
+                self.inp_dw2[i] = self.inp_dw2[i].fuse()
+            if isinstance(self.inp_dw3[i], RepVGGDW):
+                self.inp_dw3[i] = self.inp_dw3[i].fuse()
+
+    def _inp_forward(self, x, idx):
+        x = self.act(self.inp_dw1[idx](x))
+        x = self.act(self.inp_dw2[idx](x))
+        x = self.act(self.inp_dw3[idx](x))
+        x = self.inp_pw[idx](x)
+        return x
+
+    def forward(self, x):
+        c2, c3, c4, c5 = x
+
+        in5 = self.ins_conv[3](c5)
+        in4 = self.ins_conv[2](c4)
+        in3 = self.ins_conv[1](c3)
+        in2 = self.ins_conv[0](c2)
+
+        out4 = in4 + F.upsample(
+            in5, scale_factor=2, mode="nearest", align_mode=1)
+        out3 = in3 + F.upsample(
+            out4, scale_factor=2, mode="nearest", align_mode=1)
+        out2 = in2 + F.upsample(
+            out3, scale_factor=2, mode="nearest", align_mode=1)
+
+        p5 = self._inp_forward(in5, 3)
+        p4 = self._inp_forward(out4, 2)
+        p3 = self._inp_forward(out3, 1)
+        p2 = self._inp_forward(out2, 0)
+
+        if self.intracl is True:
+            p5 = self.incl4(p5)
+            p4 = self.incl3(p4)
+            p3 = self.incl2(p3)
+            p2 = self.incl1(p2)
+
+        p5 = F.upsample(p5, scale_factor=8, mode="nearest", align_mode=1)
+        p4 = F.upsample(p4, scale_factor=4, mode="nearest", align_mode=1)
+        p3 = F.upsample(p3, scale_factor=2, mode="nearest", align_mode=1)
+
+        fuse = paddle.concat([p5, p4, p3, p2], axis=1)
+        if self.training:
+            return {'fuse': fuse, 'aux_p4': out4, 'aux_p3': out3,
+                    'aux_p2': out2}
+        return fuse
 
 
 class LKPAN(nn.Layer):

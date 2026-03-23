@@ -22,7 +22,6 @@ from paddle import nn
 import paddle.nn.functional as F
 from paddle import ParamAttr
 from ppocr.modeling.backbones.det_mobilenet_v3 import ConvBNLayer
-from ppocr.modeling.backbones.rec_repvit import RepVGGDW
 
 
 def get_bias_attr(k):
@@ -33,27 +32,16 @@ def get_bias_attr(k):
 
 
 class Head(nn.Layer):
-    def __init__(self, in_channels, kernel_list=[3, 2, 2], rep_conv1=False, **kwargs):
+    def __init__(self, in_channels, kernel_list=[3, 2, 2], **kwargs):
         super(Head, self).__init__()
-        self.rep_conv1 = rep_conv1
 
-        if rep_conv1:
-            self.conv1_dw = RepVGGDW(in_channels)
-            self.conv1_act = nn.Hardswish()
-            self.conv1_pw = nn.Conv2D(
-                in_channels=in_channels,
-                out_channels=in_channels // 4,
-                kernel_size=1,
-                weight_attr=ParamAttr(),
-                bias_attr=False)
-        else:
-            self.conv1 = nn.Conv2D(
-                in_channels=in_channels,
-                out_channels=in_channels // 4,
-                kernel_size=kernel_list[0],
-                padding=int(kernel_list[0] // 2),
-                weight_attr=ParamAttr(),
-                bias_attr=False)
+        self.conv1 = nn.Conv2D(
+            in_channels=in_channels,
+            out_channels=in_channels // 4,
+            kernel_size=kernel_list[0],
+            padding=int(kernel_list[0] // 2),
+            weight_attr=ParamAttr(),
+            bias_attr=False)
         self.conv_bn1 = nn.BatchNorm(
             num_channels=in_channels // 4,
             param_attr=ParamAttr(
@@ -87,12 +75,7 @@ class Head(nn.Layer):
             bias_attr=get_bias_attr(in_channels // 4), )
 
     def forward(self, x, return_f=False):
-        if self.rep_conv1:
-            x = self.conv1_dw(x)
-            x = self.conv1_act(x)
-            x = self.conv1_pw(x)
-        else:
-            x = self.conv1(x)
+        x = self.conv1(x)
         x = self.conv_bn1(x)
         x = self.conv2(x)
         x = self.conv_bn2(x)
@@ -113,11 +96,12 @@ class DBHead(nn.Layer):
         params(dict): super parameters for build DB network
     """
 
-    def __init__(self, in_channels, k=50, aux_in_channels=0, **kwargs):
+    def __init__(self, in_channels, k=50, aux_in_channels=0, lite_head=False, **kwargs):
         super(DBHead, self).__init__()
         self.k = k
-        self.binarize = Head(in_channels, **kwargs)
-        self.thresh = Head(in_channels, **kwargs)
+        HeadCls = LiteHead if lite_head else Head
+        self.binarize = HeadCls(in_channels, **kwargs)
+        self.thresh = HeadCls(in_channels, **kwargs)
         self.aux_in_channels = aux_in_channels
 
         if aux_in_channels > 0:
@@ -127,12 +111,12 @@ class DBHead(nn.Layer):
                 'aux_p2': 1,   # 1/4  -> 1/4 (no-op)
             }
             # 每个尺度独立创建 binarize + thresh Head 对
-            self.aux_binarize_p4 = Head(aux_in_channels, **kwargs)
-            self.aux_thresh_p4 = Head(aux_in_channels, **kwargs)
-            self.aux_binarize_p3 = Head(aux_in_channels, **kwargs)
-            self.aux_thresh_p3 = Head(aux_in_channels, **kwargs)
-            self.aux_binarize_p2 = Head(aux_in_channels, **kwargs)
-            self.aux_thresh_p2 = Head(aux_in_channels, **kwargs)
+            self.aux_binarize_p4 = HeadCls(aux_in_channels, **kwargs)
+            self.aux_thresh_p4 = HeadCls(aux_in_channels, **kwargs)
+            self.aux_binarize_p3 = HeadCls(aux_in_channels, **kwargs)
+            self.aux_thresh_p3 = HeadCls(aux_in_channels, **kwargs)
+            self.aux_binarize_p2 = HeadCls(aux_in_channels, **kwargs)
+            self.aux_thresh_p2 = HeadCls(aux_in_channels, **kwargs)
 
     def step_function(self, x, y):
         return paddle.reciprocal(1 + paddle.exp(-self.k * (x - y)))
@@ -172,6 +156,123 @@ class DBHead(nn.Layer):
                     [aux_shrink, aux_thresh, aux_binary], axis=1)
 
         return result
+
+    def merge_reparam_blocks(self):
+        """Fuse reparam structures in all sub-modules for deployment."""
+        for layer in self.sublayers():
+            if isinstance(layer, LiteHead):
+                layer.fuse_deploy()
+
+
+class LiteHead(nn.Layer):
+    """Lightweight Head: upsample + DW smooth, BN-fusible.
+
+    Improvements over Head:
+      1. Conv2DTranspose → nearest upsample + DW Conv (faster, no checkerboard)
+      2. BatchNorm2D fused into Conv at deploy via fuse_deploy()
+
+    Structure (train):
+      conv1:   Conv2D(in_ch→mid, k=3, pad=1)     → channel reduction
+      bn1 + ReLU
+      ↑2× nearest upsample
+      conv2_dw: DW Conv2D(mid, k=3)               → smooth
+      bn2 + ReLU
+      ↑2× nearest upsample
+      conv3:   Conv2D(mid→1, k=1)                 → predict
+      sigmoid
+
+    Structure (deploy, after fuse_deploy):
+      conv1:   Conv2D 3×3 (BN absorbed, with bias) + ReLU
+      ↑2× nearest upsample
+      conv2_dw: DW Conv2D 3×3 (BN absorbed, with bias) + ReLU
+      ↑2× nearest upsample
+      conv3:   Conv2D 1×1 + sigmoid
+    """
+
+    def __init__(self, in_channels, kernel_list=[3, 2, 2], **kwargs):
+        super(LiteHead, self).__init__()
+        mid = in_channels // 4
+        self._deploy = False
+
+        # Stage 1: channel reduction
+        self.conv1 = nn.Conv2D(
+            in_channels, mid,
+            kernel_size=kernel_list[0],
+            padding=int(kernel_list[0] // 2),
+            weight_attr=ParamAttr(),
+            bias_attr=False)
+        self.bn1 = nn.BatchNorm2D(mid)
+
+        # Stage 2: 2× upsample + DW 3×3 smooth
+        self.conv2_dw = nn.Conv2D(
+            mid, mid, 3, padding=1, groups=mid,
+            weight_attr=ParamAttr(
+                initializer=paddle.nn.initializer.KaimingUniform()),
+            bias_attr=False)
+        self.bn2 = nn.BatchNorm2D(mid)
+
+        # Stage 3: 2× upsample + 1×1 predict
+        self.conv3 = nn.Conv2D(
+            mid, 1, 1,
+            weight_attr=ParamAttr(
+                initializer=paddle.nn.initializer.KaimingUniform()),
+            bias_attr=get_bias_attr(mid))
+
+    def forward(self, x, return_f=False):
+        x = self.conv1(x)
+        x = F.relu(self.bn1(x))
+
+        x = F.interpolate(x, scale_factor=2, mode='nearest')
+        x = self.conv2_dw(x)
+        x = F.relu(self.bn2(x))
+
+        if return_f is True:
+            f = x
+
+        x = F.interpolate(x, scale_factor=2, mode='nearest')
+        x = self.conv3(x)
+        x = F.sigmoid(x)
+
+        if return_f is True:
+            return x, f
+        return x
+
+    @staticmethod
+    @paddle.no_grad()
+    def _fuse_conv_bn(conv, bn):
+        """Fuse Conv2D + BatchNorm2D into a single Conv2D with bias."""
+        gamma = bn.weight
+        beta = bn.bias
+        mean = bn._mean
+        var = bn._variance
+        eps = bn._epsilon
+
+        std = paddle.sqrt(var + eps)
+        scale = gamma / std
+
+        w = conv.weight * scale.reshape([-1, 1, 1, 1])
+        b = beta - mean * scale
+        if conv.bias is not None:
+            b = b + conv.bias * scale
+
+        fused = nn.Conv2D(
+            conv._in_channels, conv._out_channels, conv._kernel_size,
+            stride=conv._stride, padding=conv._padding,
+            dilation=conv._dilation, groups=conv._groups)
+        fused.weight.set_value(w)
+        fused.bias.set_value(b)
+        return fused
+
+    @paddle.no_grad()
+    def fuse_deploy(self):
+        """Fuse all BN into preceding Conv for deployment."""
+        if self._deploy:
+            return
+        self.conv1 = self._fuse_conv_bn(self.conv1, self.bn1)
+        self.bn1 = nn.Identity()
+        self.conv2_dw = self._fuse_conv_bn(self.conv2_dw, self.bn2)
+        self.bn2 = nn.Identity()
+        self._deploy = True
 
 
 class LocalModule(nn.Layer):
