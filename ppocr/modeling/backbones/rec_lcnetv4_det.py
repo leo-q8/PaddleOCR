@@ -94,6 +94,24 @@ NET_CONFIG_V4_DET_REP = [
     [3, 384, 384, 1, False],
 ]
 
+NET_CONFIG_V4_DET_TINY = [
+    # k, in_c, out_c, s, use_se
+    # Tiny版: 16 -> 16 -> 32 -> 64 -> 160
+    [3, 16, 16, 1, True],
+    [3, 16, 16, 1, False],
+    [3, 16, 32, 2, False],
+    [3, 32, 32, 1, True],
+    [3, 32, 32, 1, False],
+    [3, 32, 64, 2, False],
+    [3, 64, 64, 1, True],
+    [3, 64, 64, 1, False],
+    [3, 64, 64, 1, True],
+    [3, 64, 64, 1, False],
+    [3, 64, 160, 2, False],
+    [3, 160, 160, 1, True],
+    [3, 160, 160, 1, False],
+]
+
 
 class Conv2D_BN(nn.Sequential):
     def __init__(self, in_channels, out_channels, kernel_size=1, stride=1,
@@ -637,6 +655,57 @@ class PPLCNetV4_det_rep(nn.Layer):
                 self.out_channels.append(96)
             else:
                 self.out_channels.append(NET_CONFIG_V4_DET_REP[idx - 1][2])
+        self.is_repped = False
+
+    def forward(self, x):
+        outs = []
+        for i, f in enumerate(self.features):
+            x = f(x)
+            if i in self.out_indices:
+                outs.append(x)
+        return outs
+
+    def rep(self, fuse_lab=None):
+        if self.is_repped:
+            return
+        for f in self.features:
+            if hasattr(f, 'rep'):
+                f.rep(fuse_lab=fuse_lab)
+        self.is_repped = True
+
+
+class PPLCNetV4_det_tiny(nn.Layer):
+    def __init__(
+        self,
+        in_channels=3,
+        out_indices=[2, 5, 10, 13],
+        **kwargs,
+    ):
+        super().__init__()
+        self.out_indices = out_indices
+
+        self.features = nn.LayerList()
+
+        stem = StemBlock(
+            in_channels=in_channels,
+            mid_channels=8,
+            out_channels=16,
+            lr_mult=1.0,
+        )
+        self.features.append(stem)
+
+        for config in NET_CONFIG_V4_DET_TINY:
+            k, in_c, out_c, s, se = config
+            self.features.append(
+                LCNetV4Block(in_c, out_c, s, k, se, expand_ratio=2)
+            )
+
+        self.out_channels = []
+        for idx in out_indices:
+            if idx == 0:
+                self.out_channels.append(16)
+            else:
+                self.out_channels.append(NET_CONFIG_V4_DET_TINY[idx - 1][2])
         self.is_repped = False
 
     def forward(self, x):

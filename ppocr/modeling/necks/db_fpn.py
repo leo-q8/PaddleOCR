@@ -310,7 +310,7 @@ class DWRSEFPN(nn.Layer):
     Inference: DilatedReparamBlock merges to single 5x5 DWConv, zero extra cost.
     """
 
-    def __init__(self, in_channels, out_channels, shortcut=True, **kwargs):
+    def __init__(self, in_channels, out_channels, shortcut=True, dilated_kernel_size=7, **kwargs):
         super(DWRSEFPN, self).__init__()
         self.out_channels = out_channels
         self.is_repped = False
@@ -341,7 +341,7 @@ class DWRSEFPN(nn.Layer):
             self.inp_conv_dw.append(
                 DilatedReparamBlock(
                     channels=out_channels,
-                    kernel_size=7))
+                    kernel_size=dilated_kernel_size))
 
             self.inp_conv_pw.append(
                 nn.Conv2D(
