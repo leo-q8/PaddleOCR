@@ -313,6 +313,7 @@ class DWRSEFPN(nn.Layer):
     def __init__(self, in_channels, out_channels, shortcut=True, **kwargs):
         super(DWRSEFPN, self).__init__()
         self.out_channels = out_channels
+        self.is_repped = False
         self.ins_conv = nn.LayerList()
         self.inp_conv_dw = nn.LayerList()
         self.inp_conv_pw = nn.LayerList()
@@ -397,10 +398,13 @@ class DWRSEFPN(nn.Layer):
             return {'fuse': fuse, 'aux_p4': out4, 'aux_p3': out3, 'aux_p2': out2}
         return fuse
 
-    def merge_reparam_blocks(self):
+    def rep(self):
         """Merge DilatedReparamBlock branches for inference deployment."""
+        if self.is_repped:
+            return
         for i in range(len(self.inp_conv_dw)):
-            self.inp_conv_dw[i].merge_dilated_branches()
+            self.inp_conv_dw[i].rep()
+        self.is_repped = True
 
 
 class RepViTRSEFPN(nn.Layer):
@@ -413,12 +417,13 @@ class RepViTRSEFPN(nn.Layer):
       → SE
 
     Training: RepVGGDW runs 3 branches (3×3 DW + 1×1 DW + identity).
-    Deploy:   merge_reparam_blocks() fuses to single 3×3 DW conv.
+    Deploy:   rep() fuses to single 3×3 DW conv.
     """
 
     def __init__(self, in_channels, out_channels, shortcut=True, **kwargs):
         super(RepViTRSEFPN, self).__init__()
         self.out_channels = out_channels
+        self.is_repped = False
         self.shortcut = shortcut
         self.ins_conv = nn.LayerList()
         self.inp_dw1 = nn.LayerList()
@@ -456,8 +461,10 @@ class RepViTRSEFPN(nn.Layer):
                     weight_attr=ParamAttr(initializer=weight_attr),
                     bias_attr=False))
 
-    def merge_reparam_blocks(self):
+    def rep(self):
         """Fuse all RepVGGDW 3-branch structures into single 3×3 DW convs."""
+        if self.is_repped:
+            return
         for i in range(len(self.inp_dw1)):
             if isinstance(self.inp_dw1[i], RepVGGDW):
                 self.inp_dw1[i] = self.inp_dw1[i].fuse()
@@ -465,6 +472,7 @@ class RepViTRSEFPN(nn.Layer):
                 self.inp_dw2[i] = self.inp_dw2[i].fuse()
             if isinstance(self.inp_dw3[i], RepVGGDW):
                 self.inp_dw3[i] = self.inp_dw3[i].fuse()
+        self.is_repped = True
 
     def _inp_forward(self, x, idx):
         x = self.act(self.inp_dw1[idx](x))
@@ -639,7 +647,7 @@ class DilatedReparamBlock(nn.Layer):
         super(DilatedReparamBlock, self).__init__()
         self.channels = channels
         self.kernel_size = kernel_size
-        self.deploy = deploy
+        self.is_repped = deploy
 
         if kernel_size == 9:
             self.kernel_sizes = [5, 5, 3, 3]
@@ -661,7 +669,7 @@ class DilatedReparamBlock(nn.Layer):
                 'DilatedReparamBlock requires kernel_size in [5,7,9,11,13], '
                 'but got {}'.format(kernel_size))
 
-        if not deploy:
+        if not self.is_repped:
             self.lk_origin = nn.Conv2D(
                 in_channels=channels,
                 out_channels=channels,
@@ -698,7 +706,7 @@ class DilatedReparamBlock(nn.Layer):
                 bias_attr=True)
 
     def forward(self, x):
-        if self.deploy:
+        if self.is_repped:
             return self.lk_origin(x)
         out = self.origin_bn(self.lk_origin(x))
         for k, r in zip(self.kernel_sizes, self.dilates):
@@ -756,11 +764,12 @@ class DilatedReparamBlock(nn.Layer):
             merged = large_kernel + equiv_kernel
         return merged
 
-    def merge_dilated_branches(self):
+    @paddle.no_grad()
+    def rep(self):
         """Merge all parallel branches into a single large-kernel DW conv.
         Call this before switching to deploy/inference mode."""
-        if not hasattr(self, 'origin_bn'):
-            return  # already merged
+        if self.is_repped:
+            return
         origin_k, origin_b = self._fuse_bn(self.lk_origin, self.origin_bn)
         for k, r in zip(self.kernel_sizes, self.dilates):
             conv = getattr(self, 'dil_conv_k{}_{}'.format(k, r))
@@ -781,7 +790,7 @@ class DilatedReparamBlock(nn.Layer):
         merged_conv.weight.set_value(origin_k)
         merged_conv.bias.set_value(origin_b)
         self.lk_origin = merged_conv
-        self.deploy = True
+        self.is_repped = True
 
         delattr(self, 'origin_bn')
         for k, r in zip(self.kernel_sizes, self.dilates):
@@ -808,6 +817,7 @@ class DilatedReparamConv(nn.Layer):
                  deploy=False,
                  **kwargs):
         super(DilatedReparamConv, self).__init__()
+        self.is_repped = False
         weight_attr = paddle.nn.initializer.KaimingUniform()
         self.dw = DilatedReparamBlock(
             channels=in_channels, kernel_size=kernel_size, deploy=deploy)
@@ -822,8 +832,32 @@ class DilatedReparamConv(nn.Layer):
     def forward(self, x):
         x = self.dw(x)
         x = self.pw(x)
-        x = self.bn(x)
+        if not self.is_repped:
+            x = self.bn(x)
         return x
+
+    @paddle.no_grad()
+    def rep(self):
+        """Fuse DW branches + PW Conv + BN for deployment."""
+        if self.is_repped:
+            return
+        self.dw.rep()
+        # Fuse pw(Conv2D, no bias) + bn(BatchNorm2D) into single Conv2D with bias
+        conv, bn = self.pw, self.bn
+        gamma = bn.weight
+        std = paddle.sqrt(bn._variance + bn._epsilon)
+        scale = gamma / std
+        w = conv.weight * scale[:, None, None, None]
+        b = bn.bias - bn._mean * scale
+        fused = nn.Conv2D(
+            conv._in_channels, conv._out_channels, conv._kernel_size,
+            stride=conv._stride, padding=conv._padding,
+            dilation=conv._dilation, groups=conv._groups)
+        fused.weight.set_value(w)
+        fused.bias.set_value(b)
+        self.pw = fused
+        del self.bn
+        self.is_repped = True
 
 
 class UniRepLKPAN(nn.Layer):
@@ -872,6 +906,7 @@ class UniRepLKPAN(nn.Layer):
     def __init__(self, in_channels, out_channels, mode='large', **kwargs):
         super(UniRepLKPAN, self).__init__()
         self.out_channels = out_channels
+        self.is_repped = False
         weight_attr = paddle.nn.initializer.KaimingUniform()
 
         self.ins_conv = nn.LayerList()
@@ -961,13 +996,15 @@ class UniRepLKPAN(nn.Layer):
         fuse = paddle.concat([p5, p4, p3, p2], axis=1)
         return fuse
 
-    def merge_reparam_blocks(self):
-        """Merge all DilatedReparamBlock branches for inference deployment.
-        Call this after loading trained weights, before exporting/inference."""
+    def rep(self):
+        """Merge all DilatedReparamBlock branches and fuse PW+BN for deployment."""
+        if self.is_repped:
+            return
         for i in range(len(self.inp_conv)):
-            self.inp_conv[i].dw.merge_dilated_branches()
+            self.inp_conv[i].rep()
         for i in range(len(self.pan_lat_conv)):
-            self.pan_lat_conv[i].dw.merge_dilated_branches()
+            self.pan_lat_conv[i].rep()
+        self.is_repped = True
 
 
 class ASFBlock(nn.Layer):

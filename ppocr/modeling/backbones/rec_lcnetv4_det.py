@@ -147,6 +147,7 @@ class ConvBNAct(nn.Layer):
     ):
         super().__init__()
         self.use_act = use_act
+        self.is_repped = False
         self.conv = Conv2D(
             in_channels,
             out_channels,
@@ -167,10 +168,35 @@ class ConvBNAct(nn.Layer):
 
     def forward(self, x):
         x = self.conv(x)
-        x = self.bn(x)
+        if not self.is_repped:
+            x = self.bn(x)
         if self.use_act:
             x = self.act(x)
         return x
+
+    @paddle.no_grad()
+    def rep(self):
+        """Fuse Conv + BN into a single Conv with bias, then remove BN."""
+        if self.is_repped:
+            return
+        c, bn = self.conv, self.bn
+        w = bn.weight / (bn._variance + bn._epsilon) ** 0.5
+        fused_w = c.weight * w[:, None, None, None]
+        fused_b = bn.bias - bn._mean * bn.weight / (bn._variance + bn._epsilon) ** 0.5
+        m = Conv2D(
+            c._in_channels,
+            c._out_channels,
+            c._kernel_size,
+            stride=c._stride,
+            padding=c._padding,
+            dilation=c._dilation,
+            groups=c._groups,
+        )
+        m.weight.set_value(fused_w)
+        m.bias.set_value(fused_b)
+        self.conv = m
+        del self.bn
+        self.is_repped = True
 
 
 class StemBlock(nn.Layer):
@@ -182,6 +208,7 @@ class StemBlock(nn.Layer):
         lr_mult=1.0,
     ):
         super().__init__()
+        self.is_repped = False
         self.stem1 = ConvBNAct(
             in_channels=in_channels,
             out_channels=mid_channels,
@@ -237,6 +264,13 @@ class StemBlock(nn.Layer):
         x = self.stem3(x)
         x = self.stem4(x)
         return x
+
+    def rep(self, fuse_lab=None):
+        if self.is_repped:
+            return
+        for attr in ('stem1', 'stem2a', 'stem2b', 'stem3', 'stem4'):
+            getattr(self, attr).rep()
+        self.is_repped = True
 
 
 class SELayer(nn.Layer):
@@ -372,6 +406,7 @@ class LCNetV4Block(nn.Layer):
         self.stride = stride
         self.in_channels = in_channels
         self.out_channels = out_channels
+        self.is_repped = False
 
         self.has_residual = (in_channels == out_channels and stride == 1)
         self.use_rep_dw = (stride == 1 and in_channels == out_channels)
@@ -419,10 +454,17 @@ class LCNetV4Block(nn.Layer):
             return self.channel_mixer(x)
 
     def rep(self, fuse_lab=None):
-        if hasattr(self, 'is_repped') and self.is_repped:
+        if self.is_repped:
             return
         if self.use_rep_dw and hasattr(self.token_mixer, 'rep_dw'):
             self.token_mixer.rep_dw.rep(fuse_lab=fuse_lab)
+        elif not self.use_rep_dw and hasattr(self.token_mixer, 'dw_conv'):
+            self.token_mixer.dw_conv = self.token_mixer.dw_conv.fuse()
+        # fuse channel_mixer 中的 Conv2D_BN (expand / compress)
+        for name in ('expand', 'compress'):
+            m = getattr(self.channel_mixer, name, None)
+            if m is not None and isinstance(m, Conv2D_BN):
+                setattr(self.channel_mixer, name, m.fuse())
         self.is_repped = True
 
 
@@ -462,6 +504,7 @@ class PPLCNetV4(nn.Layer):
         self.blocks6 = self._make_stage("blocks6", 5)
 
         self.out_channels = 384
+        self.is_repped = False
 
     def _make_stage(self, stage_name, lr_mult_idx):
         blocks = []
@@ -501,10 +544,14 @@ class PPLCNetV4(nn.Layer):
         return x
 
     def rep(self, fuse_lab=None):
+        if self.is_repped:
+            return
+        self.conv1.rep()
         for blocks in [self.blocks2, self.blocks3, self.blocks4, self.blocks5, self.blocks6]:
             for block in blocks:
                 if hasattr(block, 'rep'):
                     block.rep(fuse_lab=fuse_lab)
+        self.is_repped = True
 
 
 class PPLCNetV4_det(nn.Layer):
@@ -539,6 +586,7 @@ class PPLCNetV4_det(nn.Layer):
                 self.out_channels.append(48)
             else:
                 self.out_channels.append(NET_CONFIG_V4_DET[idx - 1][2])
+        self.is_repped = False
 
     def forward(self, x):
         outs = []
@@ -549,9 +597,12 @@ class PPLCNetV4_det(nn.Layer):
         return outs
 
     def rep(self, fuse_lab=None):
+        if self.is_repped:
+            return
         for f in self.features:
             if hasattr(f, 'rep'):
                 f.rep(fuse_lab=fuse_lab)
+        self.is_repped = True
 
 
 class PPLCNetV4_det_rep(nn.Layer):
@@ -586,6 +637,7 @@ class PPLCNetV4_det_rep(nn.Layer):
                 self.out_channels.append(96)
             else:
                 self.out_channels.append(NET_CONFIG_V4_DET_REP[idx - 1][2])
+        self.is_repped = False
 
     def forward(self, x):
         outs = []
@@ -596,6 +648,9 @@ class PPLCNetV4_det_rep(nn.Layer):
         return outs
 
     def rep(self, fuse_lab=None):
+        if self.is_repped:
+            return
         for f in self.features:
             if hasattr(f, 'rep'):
                 f.rep(fuse_lab=fuse_lab)
+        self.is_repped = True

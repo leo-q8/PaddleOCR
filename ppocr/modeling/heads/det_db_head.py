@@ -73,6 +73,7 @@ class Head(nn.Layer):
             weight_attr=ParamAttr(
                 initializer=paddle.nn.initializer.KaimingUniform()),
             bias_attr=get_bias_attr(in_channels // 4), )
+        self.is_repped = False
 
     def forward(self, x, return_f=False):
         x = self.conv1(x)
@@ -87,6 +88,67 @@ class Head(nn.Layer):
             return x, f
         return x
 
+    @paddle.no_grad()
+    def rep(self):
+        """Fuse Conv+BN and ConvTranspose+BN pairs for deployment."""
+        if self.is_repped:
+            return
+
+        # conv1 (Conv2D, no bias) + conv_bn1 (BatchNorm, act=relu)
+        self.conv1 = self._fuse_conv_bn(self.conv1, self.conv_bn1)
+        self.conv_bn1 = nn.ReLU()
+
+        # conv2 (Conv2DTranspose, has bias) + conv_bn2 (BatchNorm, act=relu)
+        self.conv2 = self._fuse_convtranspose_bn(self.conv2, self.conv_bn2)
+        self.conv_bn2 = nn.ReLU()
+
+        self.is_repped = True
+
+    @staticmethod
+    @paddle.no_grad()
+    def _fuse_conv_bn(conv, bn):
+        """Fuse Conv2D + BatchNorm into Conv2D with bias."""
+        gamma = bn.weight
+        std = paddle.sqrt(bn._variance + bn._epsilon)
+        scale = gamma / std
+
+        w = conv.weight * scale[:, None, None, None]
+        b = bn.bias - bn._mean * scale
+
+        fused = nn.Conv2D(
+            conv._in_channels, conv._out_channels, conv._kernel_size,
+            stride=conv._stride, padding=conv._padding,
+            dilation=conv._dilation, groups=conv._groups)
+        fused.weight.set_value(w)
+        fused.bias.set_value(b)
+        return fused
+
+    @staticmethod
+    @paddle.no_grad()
+    def _fuse_convtranspose_bn(conv, bn):
+        """Fuse Conv2DTranspose + BatchNorm into Conv2DTranspose with bias.
+
+        Conv2DTranspose weight shape: [in_ch, out_ch/groups, kH, kW]
+        BN scale applies on out_ch, i.e. axis=1.
+        """
+        gamma = bn.weight
+        std = paddle.sqrt(bn._variance + bn._epsilon)
+        scale = gamma / std
+
+        # axis=1 for ConvTranspose (output channel dimension)
+        w = conv.weight * scale[None, :, None, None]
+        b = bn.bias - bn._mean * scale
+        if conv.bias is not None:
+            b = b + conv.bias * scale
+
+        fused = nn.Conv2DTranspose(
+            conv._in_channels, conv._out_channels, conv._kernel_size,
+            stride=conv._stride, padding=conv._padding,
+            dilation=conv._dilation, groups=conv._groups)
+        fused.weight.set_value(w)
+        fused.bias.set_value(b)
+        return fused
+
 
 class DBHead(nn.Layer):
     """
@@ -99,6 +161,7 @@ class DBHead(nn.Layer):
     def __init__(self, in_channels, k=50, aux_in_channels=0, lite_head=False, **kwargs):
         super(DBHead, self).__init__()
         self.k = k
+        self.is_repped = False
         HeadCls = LiteHead if lite_head else Head
         self.binarize = HeadCls(in_channels, **kwargs)
         self.thresh = HeadCls(in_channels, **kwargs)
@@ -157,11 +220,14 @@ class DBHead(nn.Layer):
 
         return result
 
-    def merge_reparam_blocks(self):
+    def rep(self):
         """Fuse reparam structures in all sub-modules for deployment."""
+        if self.is_repped:
+            return
         for layer in self.sublayers():
-            if isinstance(layer, LiteHead):
-                layer.fuse_deploy()
+            if isinstance(layer, (Head, LiteHead)):
+                layer.rep()
+        self.is_repped = True
 
 
 class LiteHead(nn.Layer):
@@ -169,7 +235,7 @@ class LiteHead(nn.Layer):
 
     Improvements over Head:
       1. Conv2DTranspose → nearest upsample + DW Conv (faster, no checkerboard)
-      2. BatchNorm2D fused into Conv at deploy via fuse_deploy()
+      2. BatchNorm2D fused into Conv at deploy via rep()
 
     Structure (train):
       conv1:   Conv2D(in_ch→mid, k=3, pad=1)     → channel reduction
@@ -181,7 +247,7 @@ class LiteHead(nn.Layer):
       conv3:   Conv2D(mid→1, k=1)                 → predict
       sigmoid
 
-    Structure (deploy, after fuse_deploy):
+    Structure (deploy, after rep()):
       conv1:   Conv2D 3×3 (BN absorbed, with bias) + ReLU
       ↑2× nearest upsample
       conv2_dw: DW Conv2D 3×3 (BN absorbed, with bias) + ReLU
@@ -192,7 +258,7 @@ class LiteHead(nn.Layer):
     def __init__(self, in_channels, kernel_list=[3, 2, 2], **kwargs):
         super(LiteHead, self).__init__()
         mid = in_channels // 4
-        self._deploy = False
+        self.is_repped = False
 
         # Stage 1: channel reduction
         self.conv1 = nn.Conv2D(
@@ -220,11 +286,17 @@ class LiteHead(nn.Layer):
 
     def forward(self, x, return_f=False):
         x = self.conv1(x)
-        x = F.relu(self.bn1(x))
+        if self.is_repped:
+            x = F.relu(x)
+        else:
+            x = F.relu(self.bn1(x))
 
         x = F.interpolate(x, scale_factor=2, mode='nearest')
         x = self.conv2_dw(x)
-        x = F.relu(self.bn2(x))
+        if self.is_repped:
+            x = F.relu(x)
+        else:
+            x = F.relu(self.bn2(x))
 
         if return_f is True:
             f = x
@@ -264,15 +336,15 @@ class LiteHead(nn.Layer):
         return fused
 
     @paddle.no_grad()
-    def fuse_deploy(self):
+    def rep(self):
         """Fuse all BN into preceding Conv for deployment."""
-        if self._deploy:
+        if self.is_repped:
             return
         self.conv1 = self._fuse_conv_bn(self.conv1, self.bn1)
-        self.bn1 = nn.Identity()
         self.conv2_dw = self._fuse_conv_bn(self.conv2_dw, self.bn2)
-        self.bn2 = nn.Identity()
-        self._deploy = True
+        del self.bn1
+        del self.bn2
+        self.is_repped = True
 
 
 class LocalModule(nn.Layer):

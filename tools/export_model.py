@@ -188,21 +188,13 @@ def export_single_model(model,
                     shape=[None] + infer_shape, dtype="float32")
             ])
 
-    # Fuse reparam structures in backbone.
-    # PPLCNetV3/V4: sublayer.rep() with is_repped guard.
-    # RepViT: backbone.fuse_model().
+    # Fuse reparam structures for deployment.
+    # Unified dispatch: all reparameterizable modules implement rep() with
+    # is_repped guard (PPLCNetV3/V4, RepViT, DilatedReparamBlock, Head/LiteHead, etc.).
     if arch_config["model_type"] != "sr":
         for layer in model.sublayers():
             if hasattr(layer, "rep") and not getattr(layer, "is_repped", False):
                 layer.rep()
-        if hasattr(model, 'backbone') and hasattr(model.backbone, 'fuse_model'):
-            model.backbone.fuse_model()
-
-    # Merge multi-branch reparam structures (DilatedReparamBlock, RepVGGDW, etc.)
-    # in neck/head before export.
-    for layer in model.sublayers():
-        if hasattr(layer, "merge_reparam_blocks"):
-            layer.merge_reparam_blocks()
 
     if quanter is None:
         paddle.jit.save(model, save_path)
