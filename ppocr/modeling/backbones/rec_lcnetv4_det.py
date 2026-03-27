@@ -409,6 +409,180 @@ class RepDWConv(nn.Layer):
         return self._fuse_conv()
 
 
+class RepDWConvACN(nn.Layer):
+    """ACNet + MobileOne style reparameterizable depthwise convolution.
+
+    Training branches:
+    - num_dw_branches parallel 3x3 DW Conv+BN (MobileOne)
+    - 1x1 DW Conv (no BN, same as RepDWConv)
+    - Identity BN
+    - 1x3 DW Conv+BN (ACNet horizontal, optional)
+    - 3x1 DW Conv+BN (ACNet vertical, optional)
+
+    Fused to a single 3x3 DW Conv at inference.
+    """
+    def __init__(self, channels, kernel_size=3,
+                 num_dw_branches=1, use_acnet=True):
+        super().__init__()
+        self.channels = channels
+        self.kernel_size = kernel_size
+        self.use_acnet = use_acnet
+        self.is_repped = False
+        self.reparam_conv = None
+        padding = (kernel_size - 1) // 2
+
+        self.conv_3x3_list = nn.LayerList([
+            Conv2D_BN(channels, channels, kernel_size, 1, padding, groups=channels)
+            for _ in range(num_dw_branches)
+        ])
+
+        self.conv1 = Conv2D(channels, channels, 1, 1, 0,
+                            groups=channels, bias_attr=False)
+
+        self.bn = BatchNorm2D(channels)
+        nn.initializer.Constant(1.0)(self.bn.weight)
+        nn.initializer.Constant(0.0)(self.bn.bias)
+
+        if use_acnet:
+            self.conv_1x3 = Conv2D_BN(channels, channels,
+                                       (1, 3), 1, (0, 1), groups=channels)
+            self.conv_3x1 = Conv2D_BN(channels, channels,
+                                       (3, 1), 1, (1, 0), groups=channels)
+
+    def forward(self, x):
+        if self.is_repped:
+            return self.reparam_conv(x)
+        y = sum(conv(x) for conv in self.conv_3x3_list)
+        y = y + self.conv1(x) + x
+        if self.use_acnet:
+            y = y + self.conv_1x3(x) + self.conv_3x1(x)
+        return self.bn(y)
+
+    def rep(self, fuse_lab=None):
+        if self.is_repped:
+            return
+
+        fused_conv = self._fuse_conv()
+
+        padding = (self.kernel_size - 1) // 2
+        self.reparam_conv = Conv2D(
+            in_channels=self.channels,
+            out_channels=self.channels,
+            kernel_size=self.kernel_size,
+            stride=1,
+            padding=padding,
+            groups=self.channels,
+        )
+        self.reparam_conv.weight.set_value(fused_conv.weight)
+        self.reparam_conv.bias.set_value(fused_conv.bias)
+
+        self.__delattr__('conv_3x3_list')
+        self.__delattr__('conv1')
+        self.__delattr__('bn')
+        if self.use_acnet:
+            self.__delattr__('conv_1x3')
+            self.__delattr__('conv_3x1')
+
+        self.is_repped = True
+
+    @paddle.no_grad()
+    def _fuse_conv(self):
+        pad_size = self.kernel_size // 2
+
+        # 1. Fuse all 3x3 Conv+BN branches, accumulate weights and biases
+        total_w = paddle.zeros([self.channels, 1, self.kernel_size, self.kernel_size])
+        total_b = paddle.zeros([self.channels])
+        for conv_bn in self.conv_3x3_list:
+            fused = conv_bn.fuse()
+            total_w = total_w + fused.weight
+            total_b = total_b + fused.bias
+
+        # 2. 1x1 branch: pad to 3x3
+        conv1_w = F.pad(self.conv1.weight, [pad_size] * 4)
+        total_w = total_w + conv1_w
+
+        # 3. Identity branch
+        identity = F.pad(
+            paddle.ones([self.channels, 1, 1, 1]),
+            [pad_size] * 4
+        )
+        total_w = total_w + identity
+
+        # 4. ACNet branches
+        if self.use_acnet:
+            fused_1x3 = self.conv_1x3.fuse()
+            w_1x3 = F.pad(fused_1x3.weight, [0, 0, 1, 1])
+            total_w = total_w + w_1x3
+            total_b = total_b + fused_1x3.bias
+
+            fused_3x1 = self.conv_3x1.fuse()
+            w_3x1 = F.pad(fused_3x1.weight, [1, 1, 0, 0])
+            total_w = total_w + w_3x1
+            total_b = total_b + fused_3x1.bias
+
+        # 5. Apply outer BN (same pattern as RepDWConv._fuse_conv)
+        bn = self.bn
+        w = bn.weight / (bn._variance + bn._epsilon) ** 0.5
+        final_w = total_w * w[:, None, None, None]
+        final_b = bn.bias + (total_b - bn._mean) * bn.weight / (bn._variance + bn._epsilon) ** 0.5
+
+        m = Conv2D(self.channels, self.channels, self.kernel_size,
+                   1, pad_size, groups=self.channels)
+        m.weight.set_value(final_w)
+        m.bias.set_value(final_b)
+        return m
+
+    def fuse(self):
+        return self._fuse_conv()
+
+
+class Rep1x1Conv(nn.Layer):
+    """MobileOne style reparameterizable 1x1 convolution.
+
+    Training: K parallel 1x1 Conv+BN branches.
+    Inference: fused to a single 1x1 Conv.
+    """
+    def __init__(self, in_channels, out_channels,
+                 num_branches=1, bn_weight_init=1.0):
+        super().__init__()
+        self.is_repped = False
+        self.reparam_conv = None
+        self.conv_list = nn.LayerList([
+            Conv2D_BN(in_channels, out_channels, 1, 1, 0,
+                      bn_weight_init=bn_weight_init)
+            for _ in range(num_branches)
+        ])
+
+    def forward(self, x):
+        if self.is_repped:
+            return self.reparam_conv(x)
+        return sum(conv(x) for conv in self.conv_list)
+
+    def rep(self, fuse_lab=None):
+        if self.is_repped:
+            return
+        self.reparam_conv = self.fuse()
+        self.__delattr__('conv_list')
+        self.is_repped = True
+
+    @paddle.no_grad()
+    def fuse(self):
+        if self.is_repped:
+            return self.reparam_conv
+        total_w = 0
+        total_b = 0
+        for conv_bn in self.conv_list:
+            fused = conv_bn.fuse()
+            total_w = total_w + fused.weight
+            total_b = total_b + fused.bias
+        ref = self.conv_list[0].conv
+        m = Conv2D(ref._in_channels * ref._groups, ref._out_channels,
+                   1, 1, 0, groups=ref._groups)
+        m.weight.set_value(total_w)
+        m.bias.set_value(total_b)
+        return m
+
+
 class LCNetV4Block(nn.Layer):
     def __init__(
         self,
@@ -698,6 +872,212 @@ class PPLCNetV4_det_tiny(nn.Layer):
             k, in_c, out_c, s, se = config
             self.features.append(
                 LCNetV4Block(in_c, out_c, s, k, se, expand_ratio=2)
+            )
+
+        self.out_channels = []
+        for idx in out_indices:
+            if idx == 0:
+                self.out_channels.append(16)
+            else:
+                self.out_channels.append(NET_CONFIG_V4_DET_TINY[idx - 1][2])
+        self.is_repped = False
+
+    def forward(self, x):
+        outs = []
+        for i, f in enumerate(self.features):
+            x = f(x)
+            if i in self.out_indices:
+                outs.append(x)
+        return outs
+
+    def rep(self, fuse_lab=None):
+        if self.is_repped:
+            return
+        for f in self.features:
+            if hasattr(f, 'rep'):
+                f.rep(fuse_lab=fuse_lab)
+        self.is_repped = True
+
+
+class LCNetV4ACNBlock(nn.Layer):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        stride,
+        dw_size,
+        use_se=False,
+        lr_mult=1.0,
+        expand_ratio=2,
+        num_dw_branches=1,
+        use_acnet=True,
+        num_pw_branches=1,
+    ):
+        super().__init__()
+        self.stride = stride
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.is_repped = False
+
+        self.has_residual = (in_channels == out_channels and stride == 1)
+        self.use_rep_dw = (stride == 1 and in_channels == out_channels)
+
+        if self.use_rep_dw:
+            self.token_mixer = nn.Sequential()
+            self.token_mixer.add_sublayer(
+                "rep_dw",
+                RepDWConvACN(in_channels, dw_size,
+                             num_dw_branches=num_dw_branches,
+                             use_acnet=use_acnet))
+            if use_se:
+                self.token_mixer.add_sublayer(
+                    "se",
+                    SELayer(in_channels, lr_mult=lr_mult)
+                )
+        else:
+            padding = (dw_size - 1) // 2
+            self.token_mixer = nn.Sequential()
+            self.token_mixer.add_sublayer(
+                "dw_conv",
+                Conv2D_BN(in_channels, in_channels, dw_size, stride, padding, groups=in_channels)
+            )
+            if use_se:
+                self.token_mixer.add_sublayer(
+                    "se",
+                    SELayer(in_channels, lr_mult=lr_mult)
+                )
+
+        hidden_channels = int(in_channels * expand_ratio)
+
+        compress_bn_init = 0.0 if self.has_residual else 1.0
+        self.channel_mixer = nn.Sequential()
+        self.channel_mixer.add_sublayer(
+            "expand",
+            Rep1x1Conv(in_channels, hidden_channels,
+                       num_branches=num_pw_branches)
+        )
+        self.channel_mixer.add_sublayer("act", GELU())
+        self.channel_mixer.add_sublayer(
+            "compress",
+            Rep1x1Conv(hidden_channels, out_channels,
+                       num_branches=num_pw_branches,
+                       bn_weight_init=compress_bn_init)
+        )
+
+    def forward(self, x):
+        x = self.token_mixer(x)
+        if self.has_residual:
+            return x + self.channel_mixer(x)
+        else:
+            return self.channel_mixer(x)
+
+    def rep(self, fuse_lab=None):
+        if self.is_repped:
+            return
+        if self.use_rep_dw and hasattr(self.token_mixer, 'rep_dw'):
+            self.token_mixer.rep_dw.rep(fuse_lab=fuse_lab)
+        elif not self.use_rep_dw and hasattr(self.token_mixer, 'dw_conv'):
+            self.token_mixer.dw_conv = self.token_mixer.dw_conv.fuse()
+        for name in ('expand', 'compress'):
+            m = getattr(self.channel_mixer, name, None)
+            if m is not None and hasattr(m, 'fuse'):
+                setattr(self.channel_mixer, name, m.fuse())
+        self.is_repped = True
+
+
+class PPLCNetV4_det_acn(nn.Layer):
+    def __init__(
+        self,
+        in_channels=3,
+        out_indices=[2, 5, 10, 13],
+        num_dw_branches=2,
+        use_acnet=True,
+        num_pw_branches=2,
+        **kwargs,
+    ):
+        super().__init__()
+        self.out_indices = out_indices
+
+        self.features = nn.LayerList()
+
+        stem = StemBlock(
+            in_channels=in_channels,
+            mid_channels=24,
+            out_channels=48,
+            lr_mult=1.0,
+        )
+        self.features.append(stem)
+
+        for config in NET_CONFIG_V4_DET:
+            k, in_c, out_c, s, se = config
+            self.features.append(
+                LCNetV4ACNBlock(
+                    in_c, out_c, s, k, se,
+                    expand_ratio=2,
+                    num_dw_branches=num_dw_branches,
+                    use_acnet=use_acnet,
+                    num_pw_branches=num_pw_branches,
+                )
+            )
+
+        self.out_channels = []
+        for idx in out_indices:
+            if idx == 0:
+                self.out_channels.append(48)
+            else:
+                self.out_channels.append(NET_CONFIG_V4_DET[idx - 1][2])
+        self.is_repped = False
+
+    def forward(self, x):
+        outs = []
+        for i, f in enumerate(self.features):
+            x = f(x)
+            if i in self.out_indices:
+                outs.append(x)
+        return outs
+
+    def rep(self, fuse_lab=None):
+        if self.is_repped:
+            return
+        for f in self.features:
+            if hasattr(f, 'rep'):
+                f.rep(fuse_lab=fuse_lab)
+        self.is_repped = True
+
+
+class PPLCNetV4_det_acn_tiny(nn.Layer):
+    def __init__(
+        self,
+        in_channels=3,
+        out_indices=[2, 5, 10, 13],
+        num_dw_branches=3,
+        use_acnet=True,
+        num_pw_branches=3,
+        **kwargs,
+    ):
+        super().__init__()
+        self.out_indices = out_indices
+
+        self.features = nn.LayerList()
+
+        stem = StemBlock(
+            in_channels=in_channels,
+            mid_channels=8,
+            out_channels=16,
+            lr_mult=1.0,
+        )
+        self.features.append(stem)
+
+        for config in NET_CONFIG_V4_DET_TINY:
+            k, in_c, out_c, s, se = config
+            self.features.append(
+                LCNetV4ACNBlock(
+                    in_c, out_c, s, k, se,
+                    expand_ratio=2,
+                    num_dw_branches=num_dw_branches,
+                    use_acnet=use_acnet,
+                    num_pw_branches=num_pw_branches,
+                )
             )
 
         self.out_channels = []
