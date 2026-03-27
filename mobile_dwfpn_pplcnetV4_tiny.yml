@@ -50,8 +50,10 @@ Optimizer:
     learning_rate: 0.001
     warmup_epoch: 2
   regularizer:
-    name: L2
+    name: CosineL2
     factor: 5.0e-05
+    end_factor: 1.0e-06
+    warmup_epoch: 2
 PostProcess:
   name: DBPostProcess
   thresh: 0.3
