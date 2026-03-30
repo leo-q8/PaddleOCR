@@ -31,6 +31,7 @@ def build_backbone(config, model_type):
         from .rec_lcnetv4_det import PPLCNetV4_det_tiny
         from .rec_lcnetv4_det import PPLCNetV4_det_acn
         from .rec_lcnetv4_det import PPLCNetV4_det_acn_tiny
+        from .rec_lcnetv4_det import PPLCNetV4_det_v7b_tiny
 
         support_dict = [
             "MobileNetV3",
@@ -46,6 +47,7 @@ def build_backbone(config, model_type):
             "PPLCNetV4_det_tiny",
             "PPLCNetV4_det_acn",
             "PPLCNetV4_det_acn_tiny",
+            "PPLCNetV4_det_v7b_tiny",
         ]
         if model_type == "table":
             from .table_master_resnet import TableResNetExtra
