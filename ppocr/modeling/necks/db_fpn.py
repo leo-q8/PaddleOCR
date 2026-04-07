@@ -994,6 +994,8 @@ class UniRepLKPAN(nn.Layer):
         p3 = F.upsample(p3, scale_factor=2, mode="nearest", align_mode=1)
 
         fuse = paddle.concat([p5, p4, p3, p2], axis=1)
+        if self.training:
+            return {'fuse': fuse, 'aux_p4': out4, 'aux_p3': out3, 'aux_p2': out2}
         return fuse
 
     def rep(self):
