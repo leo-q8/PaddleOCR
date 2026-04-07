@@ -76,6 +76,24 @@ NET_CONFIG_V4_DET = [
     [3, 384, 384, 1, False],
 ]
 
+NET_CONFIG_V4_DET_LARGE = [
+    # k, in_c, out_c, s, use_se
+    # Large版: 128 -> 128 -> 256 -> 512 -> 896, 等效rep后 ~22.1M 对标 PPHGNetV2_B4
+    [3, 128, 128, 1, True],
+    [3, 128, 128, 1, False],
+    [3, 128, 256, 2, False],
+    [3, 256, 256, 1, True],
+    [3, 256, 256, 1, False],
+    [3, 256, 512, 2, False],
+    [3, 512, 512, 1, True],
+    [3, 512, 512, 1, False],
+    [3, 512, 512, 1, True],
+    [3, 512, 512, 1, False],
+    [3, 512, 896, 2, False],
+    [3, 896, 896, 1, True],
+    [3, 896, 896, 1, False],
+]
+
 NET_CONFIG_V4_DET_REP = [
     # k, in_c, out_c, s, use_se
     # 与识别对齐版: 96 -> 96 -> 192 -> 384
@@ -1214,6 +1232,57 @@ class PPLCNetV4_det_v7b_tiny_v2(nn.Layer):
                 self.out_channels.append(48)
             else:
                 self.out_channels.append(NET_CONFIG_V7B_DET_TINY_V2[idx - 1][2])
+        self.is_repped = False
+
+    def forward(self, x):
+        outs = []
+        for i, f in enumerate(self.features):
+            x = f(x)
+            if i in self.out_indices:
+                outs.append(x)
+        return outs
+
+    def rep(self, fuse_lab=None):
+        if self.is_repped:
+            return
+        for f in self.features:
+            if hasattr(f, 'rep'):
+                f.rep(fuse_lab=fuse_lab)
+        self.is_repped = True
+
+
+class PPLCNetV4_det_large(nn.Layer):
+    def __init__(
+        self,
+        in_channels=3,
+        out_indices=[2, 5, 10, 13],
+        **kwargs,
+    ):
+        super().__init__()
+        self.out_indices = out_indices
+
+        self.features = nn.LayerList()
+
+        stem = StemBlock(
+            in_channels=in_channels,
+            mid_channels=64,
+            out_channels=128,
+            lr_mult=1.0,
+        )
+        self.features.append(stem)
+
+        for config in NET_CONFIG_V4_DET_LARGE:
+            k, in_c, out_c, s, se = config
+            self.features.append(
+                LCNetV4Block(in_c, out_c, s, k, se, expand_ratio=2)
+            )
+
+        self.out_channels = []
+        for idx in out_indices:
+            if idx == 0:
+                self.out_channels.append(128)
+            else:
+                self.out_channels.append(NET_CONFIG_V4_DET_LARGE[idx - 1][2])
         self.is_repped = False
 
     def forward(self, x):
