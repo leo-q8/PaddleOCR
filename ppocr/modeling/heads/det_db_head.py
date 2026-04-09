@@ -254,50 +254,15 @@ class PFHeadLocal(DBHead):
         elif self.mode == 'small':
             self.cbn_layer = LocalModule(in_channels // 4, in_channels // 8)
 
-        if self.aux_in_channels > 0:
-            aux_mid = self.aux_in_channels // 8 if self.mode == 'small' else self.aux_in_channels // 4
-            self.aux_cbn_p4 = LocalModule(self.aux_in_channels // 4, aux_mid)
-            self.aux_cbn_p3 = LocalModule(self.aux_in_channels // 4, aux_mid)
-            self.aux_cbn_p2 = LocalModule(self.aux_in_channels // 4, aux_mid)
-
     def forward(self, x, targets=None):
-        # 兼容 neck 返回 dict（训练）或 tensor（推理）
-        if isinstance(x, dict):
-            fuse = x['fuse']
-            aux_feats = {k: x[k] for k in ('aux_p4', 'aux_p3', 'aux_p2') if k in x}
-        else:
-            fuse = x
-            aux_feats = {}
-
-        shrink_maps, f = self.binarize(fuse, return_f=True)
+        shrink_maps, f = self.binarize(x, return_f=True)
         base_maps = shrink_maps
         cbn_maps = self.cbn_layer(self.up_conv(f), shrink_maps, None)
         cbn_maps = F.sigmoid(cbn_maps)
         if not self.training:
             return {'maps': 0.5 * (base_maps + cbn_maps), 'cbn_maps': cbn_maps}
 
-        threshold_maps = self.thresh(fuse)
+        threshold_maps = self.thresh(x)
         binary_maps = self.step_function(shrink_maps, threshold_maps)
         y = paddle.concat([cbn_maps, threshold_maps, binary_maps], axis=1)
-        result = {'maps': y, 'distance_maps': cbn_maps, 'cbn_maps': binary_maps}
-
-        if self.aux_in_channels > 0 and aux_feats:
-            for key, feat in aux_feats.items():
-                scale = self._aux_upsample_scale[key]
-                if scale > 1:
-                    feat = F.interpolate(
-                        feat, scale_factor=scale,
-                        mode='bilinear', align_corners=False)
-                level = key[4:]  # 'p4', 'p3', 'p2'
-                aux_binarize = getattr(self, 'aux_binarize_' + level)
-                aux_thresh_head = getattr(self, 'aux_thresh_' + level)
-                aux_cbn = getattr(self, 'aux_cbn_' + level)
-                aux_shrink, aux_f = aux_binarize(feat, return_f=True)
-                aux_cbn_maps = aux_cbn(self.up_conv(aux_f), aux_shrink, None)
-                aux_cbn_maps = F.sigmoid(aux_cbn_maps)
-                aux_thresh = aux_thresh_head(feat)
-                aux_binary = self.step_function(aux_shrink, aux_thresh)
-                result['aux_maps_' + level] = paddle.concat(
-                    [aux_cbn_maps, aux_thresh, aux_binary], axis=1)
-
-        return result
+        return {'maps': y, 'distance_maps': cbn_maps, 'cbn_maps': binary_maps}

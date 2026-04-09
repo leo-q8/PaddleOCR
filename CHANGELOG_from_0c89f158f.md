@@ -109,10 +109,9 @@ PPLCNetV4 系列检测专用 backbone，基于 MetaFormer 架构（token_mixer +
 | `forward()` | 兼容 neck 返回 dict（训练，含 aux 特征）或 tensor（推理）；训练时对 aux_p2/p3/p4 分别生成 aux_maps |
 | `rep()` | 递归 rep 所有子 Head（含 aux heads） |
 
-#### 3. `PFHeadLocal` 改造
+#### 3. `PFHeadLocal`
 
-- 同样兼容 dict 输入，新增 `aux_cbn_p2/p3/p4` LocalModule
-- 辅助分支也经过 LocalModule 精细化处理
+保持原始实现不变（无 aux 辅助分支改动）。
 
 ---
 
