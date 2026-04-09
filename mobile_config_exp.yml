@@ -31,7 +31,7 @@ Architecture:
     #det: true
     name: RepSVTR_det
   Neck:
-    name: DWRSEFPN
+    name: UniRepLKFPN
     out_channels: 96
   Head:
     name: DBHead
