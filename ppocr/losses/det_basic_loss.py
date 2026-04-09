@@ -216,7 +216,7 @@ class MaskedFocalLoss(nn.Layer):
         return (loss * mask).sum() / (mask.sum() + self.eps)
 
 
-class DiceFocalLoss(nn.Layer):
+class DiceBCELoss(nn.Layer):
     """
     Combined DiceLoss + MaskedFocalLoss for binary text segmentation.
 
@@ -252,7 +252,7 @@ class DiceFocalLoss(nn.Layer):
                  focal_alpha=0.75,
                  focal_gamma=2.0,
                  eps=1e-6):
-        super(DiceFocalLoss, self).__init__()
+        super(DiceBCELoss, self).__init__()
         self.dice_weight = dice_weight
         self.focal_weight = focal_weight
         self.dice_loss = DiceLoss(eps=eps)

@@ -122,13 +122,13 @@ PPLCNetV4 系列检测专用 backbone，基于 MetaFormer 架构（token_mixer +
 | Loss | 说明 |
 |------|------|
 | `MaskedFocalLoss` | 带 mask 的 Focal Loss：`FL(p_t) = -α_t(1-p_t)^γ log(p_t)`，自适应 hard-example 加权，替代 OHEM 的硬选择策略 |
-| `DiceFocalLoss` | Dice + Focal 组合：Dice 优化全局 F1/overlap，Focal 提供像素级 hard-example 监督，互补 |
+| `DiceBCELoss` | Dice + Focal 组合：Dice 优化全局 F1/overlap，Focal 提供像素级 hard-example 监督，互补 |
 
 ### 2. `ppocr/losses/det_db_loss.py`（修改，+66 行）
 
 | 改动 | 说明 |
 |------|------|
-| `main_loss_type` 扩展 | 支持 `'DiceFocalLoss'` / `'DiceLoss'` 两种选择 |
+| `main_loss_type` 扩展 | 支持 `'DiceBCELoss'` / `'DiceLoss'` 两种选择 |
 | 新增参数 | `focal_alpha`、`focal_gamma`、`dice_weight`、`focal_weight` 等 |
 | `aux_weight_p2/p3/p4` | 辅助 loss 权重，对 aux_maps_p2/p3/p4 各自计算完整 DB loss 并加权 |
 
@@ -206,7 +206,7 @@ PPLCNetV4 系列检测专用 backbone，基于 MetaFormer 架构（token_mixer +
 
 | 文件 | Backbone | Neck | Head | 特殊配置 |
 |------|----------|------|------|---------|
-| `mobile_config_exp.yml` | RepSVTR_det | UniRepLKFPN(96) | DBHead(rep_conv1, aux) | AMP、DiceFocalLoss、MakeBorderMapAA |
+| `mobile_config_exp.yml` | RepSVTR_det | UniRepLKFPN(96) | DBHead(rep_conv1, aux) | AMP、DiceBCELoss、MakeBorderMapAA |
 | `ocr_detV4_large.yml` | PPLCNetV4_det_large | UniRepLKPAN(256, intracl) | PFHeadLocal(large) | CosineL2Decay |
 | `mobile_dwfpn_pplcnetV4.yml` | PPLCNetV4_det | UniRepLKFPN(96) | DBHead | - |
 | `mobile_dwfpn_pplcnetV4_tiny.yml` | PPLCNetV4_det_tiny | UniRepLKFPN(96) | DBHead | - |
@@ -222,5 +222,5 @@ PPLCNetV4 系列检测专用 backbone，基于 MetaFormer 架构（token_mixer +
 
 1. **PPLCNetV4 backbone 系列**：从 tiny（~405K）到 large（~22M），统一 rep 接口，推理时多分支融合为单卷积零开销
 2. **高效 Neck**：UniRepLKPAN（参数 -96%）、UniRepLKFPN（-65%），保持大感受野的同时大幅降低参数和计算量
-3. **Loss 增强**：DiceFocalLoss / TverskyFocalLoss 替代 OHEM+Dice，自适应 hard-example 加权 + 辅助深监督
+3. **Loss 增强**：DiceBCELoss / TverskyFocalLoss 替代 OHEM+Dice，自适应 hard-example 加权 + 辅助深监督
 4. **数据增强现代化**：imgaug→albumentations 迁移、抗锯齿 GT 生成（4× 超采样）、cosine weight decay 退火
