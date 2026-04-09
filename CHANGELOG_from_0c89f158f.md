@@ -161,20 +161,13 @@ PPLCNetV4 系列检测专用 backbone，基于 MetaFormer 架构（token_mixer +
 - 实现 `ImgaugLikeResize` 等自定义变换，保持与原始增强行为的兼容性
 - 支持 albumentations 新旧版本 API
 
-### 2. `ppocr/data/imaug/make_border_map.py`（修改，+128 行）
+### 2. `ppocr/data/imaug/make_border_map.py`（修改）
 
-新增 `MakeBorderMapAA`：抗锯齿 border map 生成。
+保持原始 `MakeBorderMap` 不变。
 
-- 在 `aa_scale`（默认 4×）超分辨率空间绘制 border map
-- 下采样回原始分辨率，产生更平滑的阈值图
-- 减少离散化导致的边界像素标注噪声
+### 3. `ppocr/data/imaug/make_shrink_map.py`（修改）
 
-### 3. `ppocr/data/imaug/make_shrink_map.py`（修改，+73 行）
-
-新增 `MakeShrinkMapAA`：抗锯齿 shrink map 生成。
-
-- 同样使用 4× 超采样 + 下采样
-- 减少 shrink 区域边界的锯齿效应
+保持原始 `MakeShrinkMap` 不变。
 
 ### 4. `ppocr/data/imaug/random_crop_data.py`（重构，+337 行）
 
@@ -184,9 +177,9 @@ PPLCNetV4 系列检测专用 backbone，基于 MetaFormer 架构（token_mixer +
 
 配合增强改动的算子调整。
 
-### 6. `ppocr/data/imaug/__init__.py`（修改，+4 行）
+### 6. `ppocr/data/imaug/__init__.py`（修改）
 
-注册 `MakeBorderMapAA`、`MakeShrinkMapAA`。
+更新导入。
 
 ---
 
@@ -206,7 +199,7 @@ PPLCNetV4 系列检测专用 backbone，基于 MetaFormer 架构（token_mixer +
 
 | 文件 | Backbone | Neck | Head | 特殊配置 |
 |------|----------|------|------|---------|
-| `mobile_config_exp.yml` | RepSVTR_det | UniRepLKFPN(96) | DBHead(rep_conv1, aux) | AMP、DiceBCELoss、MakeBorderMapAA |
+| `mobile_config_exp.yml` | RepSVTR_det | UniRepLKFPN(96) | DBHead(rep_conv1, aux) | AMP、DiceBCELoss |
 | `ocr_detV4_large.yml` | PPLCNetV4_det_large | UniRepLKPAN(256, intracl) | PFHeadLocal(large) | CosineL2Decay |
 | `mobile_dwfpn_pplcnetV4.yml` | PPLCNetV4_det | UniRepLKFPN(96) | DBHead | - |
 | `mobile_dwfpn_pplcnetV4_tiny.yml` | PPLCNetV4_det_tiny | UniRepLKFPN(96) | DBHead | - |
@@ -223,4 +216,4 @@ PPLCNetV4 系列检测专用 backbone，基于 MetaFormer 架构（token_mixer +
 1. **PPLCNetV4 backbone 系列**：从 tiny（~405K）到 large（~22M），统一 rep 接口，推理时多分支融合为单卷积零开销
 2. **高效 Neck**：UniRepLKPAN（参数 -96%）、UniRepLKFPN（-65%），保持大感受野的同时大幅降低参数和计算量
 3. **Loss 增强**：DiceBCELoss / TverskyFocalLoss 替代 OHEM+Dice，自适应 hard-example 加权 + 辅助深监督
-4. **数据增强现代化**：imgaug→albumentations 迁移、抗锯齿 GT 生成（4× 超采样）、cosine weight decay 退火
+4. **数据增强现代化**：imgaug→albumentations 迁移、cosine weight decay 退火
