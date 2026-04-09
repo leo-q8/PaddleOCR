@@ -123,15 +123,13 @@ PPLCNetV4 系列检测专用 backbone，基于 MetaFormer 架构（token_mixer +
 |------|------|
 | `MaskedFocalLoss` | 带 mask 的 Focal Loss：`FL(p_t) = -α_t(1-p_t)^γ log(p_t)`，自适应 hard-example 加权，替代 OHEM 的硬选择策略 |
 | `DiceFocalLoss` | Dice + Focal 组合：Dice 优化全局 F1/overlap，Focal 提供像素级 hard-example 监督，互补 |
-| `TverskyLoss` | 不对称 Dice 推广：`TI = TP/(TP + αFP + βFN)`，β>α 时更惩罚漏检，召回率导向 |
-| `TverskyFocalLoss` | Tversky + Focal 组合：召回导向的 region loss + 边界精度的 pixel loss |
 
 ### 2. `ppocr/losses/det_db_loss.py`（修改，+66 行）
 
 | 改动 | 说明 |
 |------|------|
-| `main_loss_type` 扩展 | 支持 `'DiceFocalLoss'` / `'TverskyFocalLoss'` / `'DiceLoss'` 三种选择 |
-| 新增参数 | `focal_alpha`、`focal_gamma`、`dice_weight`、`focal_weight`、`tversky_alpha`、`tversky_beta` 等 |
+| `main_loss_type` 扩展 | 支持 `'DiceFocalLoss'` / `'DiceLoss'` 两种选择 |
+| 新增参数 | `focal_alpha`、`focal_gamma`、`dice_weight`、`focal_weight` 等 |
 | `aux_weight_p2/p3/p4` | 辅助 loss 权重，对 aux_maps_p2/p3/p4 各自计算完整 DB loss 并加权 |
 
 ---
