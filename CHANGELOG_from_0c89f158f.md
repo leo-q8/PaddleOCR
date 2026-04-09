@@ -61,7 +61,7 @@ PPLCNetV4 系列检测专用 backbone，基于 MetaFormer 架构（token_mixer +
 
 ### 1. `ppocr/modeling/necks/db_fpn.py`（修改，+615 行）
 
-新增 3 个 Neck 和 2 个基础模块：
+新增 2 个 Neck 和 2 个基础模块：
 
 #### 基础模块
 
@@ -76,7 +76,6 @@ PPLCNetV4 系列检测专用 backbone，基于 MetaFormer 架构（token_mixer +
 |------|------|------------|---------|
 | `UniRepLKPAN` | 用 DilatedReparamConv 替换 LKPAN 的 8 个 9×9 标准 Conv（4 inp_conv + 4 pan_lat_conv） | 9×9 标准 Conv → DW 9×9 reparam + PW 1×1 | 9×9 部分从 6.6M → 274K（**-96%**） |
 | `DWRSEFPN` | DilatedReparamBlock(DW 7×7) + PW + SE 替换 RSEFPN 的 inp_conv | 3×3 标准 Conv → DW 7×7 reparam + PW | inp_conv 减少 **65%**，感受野 3→7 |
-| `RepViTRSEFPN` | 3 层堆叠 RepVGGDW(3×3) + HardSwish + PW 替换 RSEFPN inp_conv | 单层 3×3 → 3 层 DW 3×3 reparam | 轻量版方案，有效感受野扩大 |
 
 所有新 Neck 均：
 - 支持 `intracl=True`（IntraCLBlock 上下文学习模块）
@@ -89,7 +88,7 @@ PPLCNetV4 系列检测专用 backbone，基于 MetaFormer 架构（token_mixer +
 
 ### 3. `ppocr/modeling/necks/__init__.py`（修改，+9 行）
 
-注册 `UniRepLKPAN`、`DWRSEFPN`、`RepViTRSEFPN`、`GPAN`、`GFPN`。
+注册 `UniRepLKPAN`、`DWRSEFPN`、`GPAN`、`GFPN`。
 
 ---
 
@@ -219,7 +218,7 @@ PPLCNetV4 系列检测专用 backbone，基于 MetaFormer 架构（token_mixer +
 
 | 文件 | Backbone | Neck | Head | 特殊配置 |
 |------|----------|------|------|---------|
-| `mobile_config_exp.yml` | RepSVTR_det | RepViTRSEFPN(96) | DBHead(rep_conv1, aux) | AMP、DiceFocalLoss、MakeBorderMapAA |
+| `mobile_config_exp.yml` | RepSVTR_det | DWRSEFPN(96) | DBHead(rep_conv1, aux) | AMP、DiceFocalLoss、MakeBorderMapAA |
 | `ocr_detV4_large.yml` | PPLCNetV4_det_large | UniRepLKPAN(256, intracl) | PFHeadLocal(large) | CosineL2Decay |
 | `mobile_dwfpn_pplcnetV4.yml` | PPLCNetV4_det | DWRSEFPN(96) | DBHead | - |
 | `mobile_dwfpn_pplcnetV4_tiny.yml` | PPLCNetV4_det_tiny | DWRSEFPN(96) | DBHead | - |
@@ -234,6 +233,6 @@ PPLCNetV4 系列检测专用 backbone，基于 MetaFormer 架构（token_mixer +
 ## 核心设计主线
 
 1. **PPLCNetV4 backbone 系列**：从 tiny（~405K）到 large（~22M），统一 rep 接口，推理时多分支融合为单卷积零开销
-2. **高效 Neck**：UniRepLKPAN（参数 -96%）、DWRSEFPN（-65%）、RepViTRSEFPN，保持大感受野的同时大幅降低参数和计算量
+2. **高效 Neck**：UniRepLKPAN（参数 -96%）、DWRSEFPN（-65%），保持大感受野的同时大幅降低参数和计算量
 3. **Loss 增强**：DiceFocalLoss / TverskyFocalLoss 替代 OHEM+Dice，自适应 hard-example 加权 + 辅助深监督
 4. **数据增强现代化**：imgaug→albumentations 迁移、抗锯齿 GT 生成（4× 超采样）、cosine weight decay 退火
