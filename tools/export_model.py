@@ -188,11 +188,12 @@ def export_single_model(model,
                     shape=[None] + infer_shape, dtype="float32")
             ])
 
-    if arch_config["model_type"] != "sr" and arch_config["Backbone"][
-            "name"] == "PPLCNetV3":
-        # for rep lcnetv3
+    # Fuse reparam structures for deployment.
+    # Unified dispatch: all reparameterizable modules implement rep() with
+    # is_repped guard (PPLCNetV3/V4, RepViT, DilatedReparamBlock, Head/LiteHead, etc.).
+    if arch_config["model_type"] != "sr":
         for layer in model.sublayers():
-            if hasattr(layer, "rep") and not getattr(layer, "is_repped"):
+            if hasattr(layer, "rep") and not getattr(layer, "is_repped", False):
                 layer.rep()
 
     if quanter is None:

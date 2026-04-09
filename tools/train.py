@@ -151,7 +151,7 @@ def main(config, device, logger, vdl_writer):
     loss_class = build_loss(config["Loss"])
 
     # build optim
-    optimizer, lr_scheduler = build_optimizer(
+    optimizer, lr_scheduler, wd_scheduler = build_optimizer(
         config["Optimizer"],
         epochs=config["Global"]["epoch_num"],
         step_each_epoch=len(train_dataloader),
@@ -229,6 +229,7 @@ def main(config, device, logger, vdl_writer):
         amp_custom_black_list,
         amp_custom_white_list,
         amp_dtype,
+        wd_scheduler=wd_scheduler,
     )
 
 

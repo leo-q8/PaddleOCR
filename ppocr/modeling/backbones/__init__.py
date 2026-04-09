@@ -26,6 +26,14 @@ def build_backbone(config, model_type):
         from .rec_hgnet import PPHGNet_small
         from .rec_vit import ViT
         from .rec_repvit import RepSVTR_det
+        from .det_pphgnetv2 import PPHGNetV2_B4
+        from .rec_lcnetv4_det import PPLCNetV4_det
+        from .rec_lcnetv4_det import PPLCNetV4_det_tiny
+        from .rec_lcnetv4_det import PPLCNetV4_det_acn
+        from .rec_lcnetv4_det import PPLCNetV4_det_acn_tiny
+        from .rec_lcnetv4_det import PPLCNetV4_det_v7b_tiny
+        from .rec_lcnetv4_det import PPLCNetV4_det_v7b_tiny_v2
+        from .rec_lcnetv4_det import PPLCNetV4_det_large
 
         support_dict = [
             "MobileNetV3",
@@ -35,7 +43,15 @@ def build_backbone(config, model_type):
             "PPLCNet",
             "PPLCNetV3",
             "PPHGNet_small",
+            "PPHGNetV2_B4",
             "RepSVTR_det",
+            "PPLCNetV4_det",
+            "PPLCNetV4_det_tiny",
+            "PPLCNetV4_det_acn",
+            "PPLCNetV4_det_acn_tiny",
+            "PPLCNetV4_det_v7b_tiny",
+            "PPLCNetV4_det_v7b_tiny_v2",
+            "PPLCNetV4_det_large",
         ]
         if model_type == "table":
             from .table_master_resnet import TableResNetExtra

@@ -17,8 +17,8 @@ from __future__ import print_function
 from __future__ import unicode_literals
 
 from .iaa_augment import IaaAugment
-from .make_border_map import MakeBorderMap
-from .make_shrink_map import MakeShrinkMap
+from .make_border_map import MakeBorderMap, MakeBorderMapAA
+from .make_shrink_map import MakeShrinkMap, MakeShrinkMapAA
 from .random_crop_data import EastRandomCropData, RandomCropImgMask
 from .make_pse_gt import MakePseGt
 
