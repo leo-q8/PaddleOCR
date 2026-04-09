@@ -8,7 +8,7 @@
 
 ## 一、Backbone（新增 & 修改）
 
-### 1. `ppocr/modeling/backbones/rec_lcnetv4_det.py`（新增，1302 行）
+### 1. `ppocr/modeling/backbones/rec_lcnetv4_det.py`（新增，819 行）
 
 PPLCNetV4 系列检测专用 backbone，基于 MetaFormer 架构（token_mixer + channel_mixer），全面支持重参数化。
 
@@ -18,12 +18,9 @@ PPLCNetV4 系列检测专用 backbone，基于 MetaFormer 架构（token_mixer +
 | `NET_CONFIG_V4_DET_LARGE` | Large 版通道配置：128→256→512→896，对标 PPHGNetV2_B4（~22M 参数） |
 | `Conv2D_BN` | 可融合的 Conv+BN 基础单元，`fuse()` 将 BN 吸收进 Conv |
 | `RepDWConv` | 多分支重参数化 DW 卷积：3×3 DW+BN + 1×1 DW + Identity BN，推理时融合为单个 3×3 DW |
-| `RepDWConvACN` | ACNet + MobileOne 风格增强版：在 RepDWConv 基础上增加 1×3 / 3×1 异形卷积分支和 K 个并行 3×3，捕获方向性边缘特征 |
-| `Rep1x1Conv` | MobileOne 风格可重参数化 1×1 卷积：K 个并行 1×1 Conv+BN，推理时融合 |
 | `StemBlock` | 双 3×3 Conv + MaxPool2D stem（移除了无效的 `ceil_mode=True`，stride=1+padding=SAME 下无影响） |
 | `SEBlock` | Squeeze-and-Excitation 注意力模块 |
 | `LCNetV4Block` | 基础 block：RepDWConv token_mixer + Conv2D_BN channel_mixer + 可选 SE |
-| `LCNetV4ACNBlock` | ACN 增强 block：使用 RepDWConvACN + Rep1x1Conv，推理时参数量与 LCNetV4Block 一致 |
 
 **Backbone 变体：**
 
@@ -31,10 +28,6 @@ PPLCNetV4 系列检测专用 backbone，基于 MetaFormer 架构（token_mixer +
 |------|---------|------|------|
 | `PPLCNetV4_det` | 48→96→192→384 | mid=24, out=48 | 基础轻量版 |
 | `PPLCNetV4_det_tiny` | 24→48→96→192 | mid=12, out=24 | 超轻量版（~405K 参数） |
-| `PPLCNetV4_det_acn` | 48→96→192→384 | mid=24, out=48 | ACNet+MobileOne 增强版 |
-| `PPLCNetV4_det_acn_tiny` | 24→48→96→192 | mid=12, out=24 | ACN 超轻量版 |
-| `PPLCNetV4_det_v7b_tiny` | 24→48→96→192 | mid=12, out=24 | V7B block 结构变体 |
-| `PPLCNetV4_det_v7b_tiny_v2` | 48→96→160 | mid=24, out=48 | V7B 通道调整版 |
 | `PPLCNetV4_det_large` | 128→256→512→896 | mid=64, out=128 | Large 版，匹配 PPHGNetV2_B4 参数量 |
 
 所有变体共享 `out_indices=[2,5,10,13]`，输出 4 级特征图。所有变体均实现统一的 `rep()` + `is_repped` 重参数化接口。
@@ -53,7 +46,7 @@ PPLCNetV4 系列检测专用 backbone，基于 MetaFormer 架构（token_mixer +
 
 ### 5. `ppocr/modeling/backbones/__init__.py`（修改，+16 行）
 
-新增 8 个 backbone 的 import 和 support_dict 注册：`PPHGNetV2_B4`、`PPLCNetV4_det`、`PPLCNetV4_det_tiny`、`PPLCNetV4_det_acn`、`PPLCNetV4_det_acn_tiny`、`PPLCNetV4_det_v7b_tiny`、`PPLCNetV4_det_v7b_tiny_v2`、`PPLCNetV4_det_large`。
+新增 4 个 backbone 的 import 和 support_dict 注册：`PPHGNetV2_B4`、`PPLCNetV4_det`、`PPLCNetV4_det_tiny`、`PPLCNetV4_det_large`。
 
 ---
 
@@ -203,10 +196,6 @@ PPLCNetV4 系列检测专用 backbone，基于 MetaFormer 架构（token_mixer +
 | `ocr_detV4_large.yml` | PPLCNetV4_det_large | UniRepLKPAN(256, intracl) | PFHeadLocal(large) | CosineL2Decay |
 | `mobile_dwfpn_pplcnetV4.yml` | PPLCNetV4_det | UniRepLKFPN(96) | DBHead | - |
 | `mobile_dwfpn_pplcnetV4_tiny.yml` | PPLCNetV4_det_tiny | UniRepLKFPN(96) | DBHead | - |
-| `mobile_dwfpn_pplcnetV4_acn.yml` | PPLCNetV4_det_acn | UniRepLKFPN(96) | DBHead | ACNet+MobileOne |
-| `mobile_dwfpn_pplcnetV4_acn_tiny.yml` | PPLCNetV4_det_acn_tiny | UniRepLKFPN(96) | DBHead | ACNet+MobileOne |
-| `mobile_dwfpn_pplcnetV4_v7b_tiny.yml` | PPLCNetV4_det_v7b_tiny | UniRepLKFPN(96) | DBHead | V7B block |
-| `mobile_dwfpn_pplcnetV4_v7b_tiny_v2.yml` | PPLCNetV4_det_v7b_tiny_v2 | UniRepLKFPN(96) | DBHead | V7B v2 |
 | `official_v5_server_aux.yml` | PPHGNetV2_B4 | LKPAN(256, intracl) | PFHeadLocal(large, aux) | 辅助监督 |
 
 ---
@@ -215,5 +204,5 @@ PPLCNetV4 系列检测专用 backbone，基于 MetaFormer 架构（token_mixer +
 
 1. **PPLCNetV4 backbone 系列**：从 tiny（~405K）到 large（~22M），统一 rep 接口，推理时多分支融合为单卷积零开销
 2. **高效 Neck**：UniRepLKPAN（参数 -96%）、UniRepLKFPN（-65%），保持大感受野的同时大幅降低参数和计算量
-3. **Loss 增强**：DiceBCELoss / TverskyFocalLoss 替代 OHEM+Dice，自适应 hard-example 加权 + 辅助深监督
+3. **Loss 增强**：DiceBCELoss 替代 OHEM+Dice，自适应 hard-example 加权 + 辅助深监督
 4. **数据增强现代化**：imgaug→albumentations 迁移、cosine weight decay 退火
