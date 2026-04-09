@@ -101,24 +101,15 @@ PPLCNetV4 系列检测专用 backbone，基于 MetaFormer 架构（token_mixer +
 - 新增 `rep()` 方法：融合 Conv2D+BatchNorm 和 Conv2DTranspose+BatchNorm 为带 bias 的单层算子
 - 新增 `_fuse_conv_bn()` / `_fuse_convtranspose_bn()` 静态工具方法
 
-#### 2. `LiteHead`（新增）
-
-轻量级 Head，替代原始 Head 的 Conv2DTranspose 上采样：
-- nearest upsample + DW Conv 3×3 smooth（无棋盘格伪影）
-- BN 可通过 `rep()` 融合进 Conv
-
-结构：Conv 3×3 → BN+ReLU → ↑2× → DW 3×3 → BN+ReLU → ↑2× → Conv 1×1 → sigmoid
-
-#### 3. `DBHead` 改造
+#### 2. `DBHead` 改造
 
 | 改动 | 说明 |
 |------|------|
 | `aux_in_channels` 参数 | 每个尺度（p2/p3/p4）创建独立的 aux binarize + aux thresh Head，实现深监督 |
-| `lite_head` 参数 | 选择使用 LiteHead 或原始 Head |
 | `forward()` | 兼容 neck 返回 dict（训练，含 aux 特征）或 tensor（推理）；训练时对 aux_p2/p3/p4 分别生成 aux_maps |
 | `rep()` | 递归 rep 所有子 Head（含 aux heads） |
 
-#### 4. `PFHeadLocal` 改造
+#### 3. `PFHeadLocal` 改造
 
 - 同样兼容 dict 输入，新增 `aux_cbn_p2/p3/p4` LocalModule
 - 辅助分支也经过 LocalModule 精细化处理
