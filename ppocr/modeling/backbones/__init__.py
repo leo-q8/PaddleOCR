@@ -29,6 +29,10 @@ def build_backbone(config, model_type):
         from .rec_repvit import RepSVTR_det
         from .rec_vary_vit import Vary_VIT_B
         from .rec_pphgnetv2 import PPHGNetV2_B4
+        from .rec_lcnetv4 import PPLCNetV4_det
+        from .rec_lcnetv4 import PPLCNetV4_det_tiny
+        from .rec_lcnetv4 import PPLCNetV4_det_tiny_v2
+        from .rec_lcnetv4 import PPLCNetV4_det_large
 
         support_dict = [
             "MobileNetV3",
@@ -42,6 +46,11 @@ def build_backbone(config, model_type):
             "RepSVTR_det",
             "Vary_VIT_B",
             "PPHGNetV2_B4",
+            "RepSVTR_det",
+            "PPLCNetV4_det",
+            "PPLCNetV4_det_tiny",
+            "PPLCNetV4_det_tiny_v2",
+            "PPLCNetV4_det_large",
         ]
         if model_type == "table":
             from .table_master_resnet import TableResNetExtra
